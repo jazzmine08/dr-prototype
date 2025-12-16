@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>DR Ensemble - Results</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            background: #fafafa;
+        }
+
+        header {
+            background: #111827;
+            color: white;
+            padding: 14px 20px;
+        }
+
+        .brand {
+            font-size: 18px;
+            font-weight: 700;
+            margin-right: 18px;
+        }
+
+        nav {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        nav a {
+            color: #e5e7eb;
+            text-decoration: none;
+            padding: 8px 10px;
+            border-radius: 10px;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        nav a:hover {
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        nav a.active {
+            background: rgba(255, 255, 255, 0.16);
+            color: #fff;
+        }
+
+        main {
+            padding: 22px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .row {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 340px 1fr;
+            gap: 14px;
+        }
+
+        @media (max-width: 1000px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 14px;
+            padding: 16px;
+            margin-top: 16px;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+        }
+
+        .muted {
+            color: #6b7280;
+        }
+
+        select {
+            padding: 10px 12px;
+            border-radius: 12px;
+            border: 1px solid #d1d5db;
+            background: white;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        button {
+            padding: 10px 14px;
+            border: 0;
+            border-radius: 12px;
+            cursor: pointer;
+            font-weight: 700;
+        }
+
+        button.secondary {
+            background: #e5e7eb;
+            color: #111827;
+        }
+
+        .runs {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .run-item {
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 10px 12px;
+            cursor: pointer;
+            background: #fff;
+        }
+
+        .run-item:hover {
+            background: #f9fafb;
+        }
+
+        .run-item.active {
+            border-color: #2563eb;
+            box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+        }
+
+        .run-title {
+            font-weight: 800;
+            font-size: 13px;
+        }
+
+        .run-sub {
+            font-size: 12px;
+            color: #6b7280;
+            margin-top: 4px;
+        }
+
+        .img-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        @media (max-width: 1000px) {
+            .img-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        img {
+            width: 100%;
+            border-radius: 12px;
+            border: 1px solid #e5e7eb;
+            background: #fff;
+        }
+
+        pre {
+            white-space: pre-wrap;
+            background: #0b0f14;
+            color: #d8e1ff;
+            padding: 12px;
+            border-radius: 12px;
+            overflow: auto;
+            font-family: Consolas, monospace;
+            font-size: 13px;
+        }
+
+        .pill {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 999px;
+            background: #fff7ed;
+            color: #9a3412;
+            font-weight: 700;
+            font-size: 12px;
+        }
+
+        .kpi {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 10px;
+        }
+
+        .kpi .box {
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 10px 12px;
+            background: #fff;
+        }
+
+        .kpi .label {
+            font-size: 12px;
+            color: #6b7280;
+            font-weight: 700;
+        }
+
+        .kpi .val {
+            font-size: 16px;
+            font-weight: 900;
+            margin-top: 4px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <header>
+        <div class="row" style="justify-content: space-between;">
+            <div class="row">
+                <div class="brand">DR Ensemble</div>
+                <nav>
+                    <a href="/">Home</a>
+                    <a href="/preprocessing">Preprocessing</a>
+                    <a href="/eda">EDA</a>
+                    <a href="/training">Training</a>
+                    <a href="/ensemble">Ensemble</a>
+                    <a href="/results" class="active">Results</a>
+                </nav>
+            </div>
+            <div class="pill">Training Results</div>
+        </div>
+    </header>
+
+    <main>
+        <h2 style="margin:0;">Results</h2>
+        <p class="muted" style="margin-top:6px;">
+            Select dataset, then select a run to view learning curves, confusion matrix, and classification report.
+        </p>
+
+        <div class="grid">
+            <!-- LEFT -->
+            <div class="card">
+                <label style="font-weight:800;">Dataset</label>
+                <select id="datasetSelect"></select>
+
+                <div class="row" style="margin-top:12px;">
+                    <button class="secondary" id="btnRefresh">Refresh Runs</button>
+                    <span class="muted" id="runCount"></span>
+                </div>
+
+                <div class="runs" id="runsList"></div>
+            </div>
+
+            <!-- RIGHT -->
+            <div class="card">
+                <div style="font-weight:900; font-size:16px;">Selected Run</div>
+                <div class="muted" id="selectedRun">None</div>
+                <div class="muted" id="runDir" style="margin-top:4px;"></div>
+
+                <div class="kpi" id="kpis" style="display:none;">
+                    <div class="box">
+                        <div class="label">QWK (Kappa)</div>
+                        <div class="val" id="kappaVal">-</div>
+                    </div>
+                    <div class="box">
+                        <div class="label">Best Val Acc</div>
+                        <div class="val" id="bestValAcc">-</div>
+                    </div>
+                    <div class="box">
+                        <div class="label">Best Val Loss</div>
+                        <div class="val" id="bestValLoss">-</div>
+                    </div>
+                    <div class="box">
+                        <div class="label">Eval Accuracy</div>
+                        <div class="val" id="evalAcc">-</div>
+                    </div>
+                </div>
+
+                <div class="img-grid" style="margin-top:14px;">
+                    <div>
+                        <div class="muted" style="font-weight:800; margin-bottom:6px;">Accuracy Curve</div>
+                        <img id="imgAcc" alt="Accuracy curve" />
+                    </div>
+                    <div>
+                        <div class="muted" style="font-weight:800; margin-bottom:6px;">Loss Curve</div>
+                        <img id="imgLoss" alt="Loss curve" />
+                    </div>
+                    <div style="grid-column: 1 / -1;">
+                        <div class="muted" style="font-weight:800; margin-bottom:6px;">Confusion Matrix</div>
+                        <img id="imgCM" alt="Confusion matrix" />
+                    </div>
+                </div>
+
+                <div style="margin-top:14px;">
+                    <div class="muted" style="font-weight:800; margin-bottom:6px;">Classification Report</div>
+                    <pre id="reportBox">(select a run)</pre>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const datasetSelect = document.getElementById("datasetSelect");
+        const runsList = document.getElementById("runsList");
+        const runCount = document.getElementById("runCount");
+
+        const selectedRun = document.getElementById("selectedRun");
+        const runDir = document.getElementById("runDir");
+
+        const kpis = document.getElementById("kpis");
+        const kappaVal = document.getElementById("kappaVal");
+        const bestValAcc = document.getElementById("bestValAcc");
+        const bestValLoss = document.getElementById("bestValLoss");
+        const evalAcc = document.getElementById("evalAcc");
+
+        const imgAcc = document.getElementById("imgAcc");
+        const imgLoss = document.getElementById("imgLoss");
+        const imgCM = document.getElementById("imgCM");
+
+        const reportBox = document.getElementById("reportBox");
+
+        function clearDetails() {
+            selectedRun.textContent = "None";
+            runDir.textContent = "";
+            kpis.style.display = "none";
+            kappaVal.textContent = "-";
+            bestValAcc.textContent = "-";
+            bestValLoss.textContent = "-";
+            evalAcc.textContent = "-";
+            imgAcc.removeAttribute("src");
+            imgLoss.removeAttribute("src");
+            imgCM.removeAttribute("src");
+            reportBox.textContent = "(select a run)";
+        }
+
+        function fmt(x) {
+            if (x === null || x === undefined || x === "") return "-";
+            const n = Number(x);
+            return isNaN(n) ? String(x) : n.toFixed(4);
+        }
+
+        async function loadDatasets() {
+            const res = await fetch("/datasets");
+            const data = await res.json();
+            datasetSelect.innerHTML = "";
+            (data.datasets || []).forEach(ds => {
+                const opt = document.createElement("option");
+                opt.value = ds;
+                opt.textContent = (ds === "aptos2019") ? "APTOS 2019" : (ds === "drtid") ? "DRTiD" : ds;
+                datasetSelect.appendChild(opt);
+            });
+            if ([...datasetSelect.options].some(o => o.value === "aptos2019")) {
+                datasetSelect.value = "aptos2019";
+            }
+        }
+
+        async function refreshRuns() {
+            const ds = datasetSelect.value || "aptos2019";
+            runsList.innerHTML = "<div class='muted'>Loading runs...</div>";
+
+            const res = await fetch(`/api/results/list?dataset=${encodeURIComponent(ds)}`);
+            const data = await res.json();
+
+            if (data.status !== "ok") {
+                runsList.innerHTML = `<div class='muted'>❌ ${data.message || "Failed to load runs"}</div>`;
+                clearDetails();
+                return;
+            }
+
+            const runs = data.runs || [];
+            runCount.textContent = `${runs.length} run(s)`;
+
+            if (runs.length === 0) {
+                runsList.innerHTML = "<div class='muted'>No runs yet. Train a model first.</div>";
+                clearDetails();
+                return;
+            }
+
+            runsList.innerHTML = "";
+            runs.forEach(runId => {
+                const item = document.createElement("div");
+                item.className = "run-item";
+                item.innerHTML = `
+        <div class="run-title">${runId}</div>
+        <div class="run-sub">Click to view details</div>
+      `;
+                item.addEventListener("click", async () => {
+                    [...document.querySelectorAll(".run-item")].forEach(x => x.classList.remove("active"));
+                    item.classList.add("active");
+                    await loadRunDetails(ds, runId);
+                });
+                runsList.appendChild(item);
+            });
+
+            // auto-click first
+            const first = runsList.querySelector(".run-item");
+            if (first) first.click();
+        }
+
+        async function loadRunDetails(ds, runId) {
+            clearDetails();
+            selectedRun.textContent = `${ds} / ${runId}`;
+
+            const res = await fetch(`/api/results/get?dataset=${encodeURIComponent(ds)}&run_id=${encodeURIComponent(runId)}`);
+            const data = await res.json();
+
+            if (data.status !== "ok") {
+                reportBox.textContent = `❌ ${data.message || "Failed to load run"}`;
+                return;
+            }
+
+            runDir.textContent = data.run_dir || "";
+
+            const metrics = data.metrics || {};
+            const evaluation = data.evaluation || {};
+            const imgs = data.images || {};
+
+            kpis.style.display = "flex";
+            kappaVal.textContent = fmt(metrics.kappa_qwk);
+            bestValAcc.textContent = fmt(metrics.best_val_accuracy);
+            bestValLoss.textContent = fmt(metrics.best_val_loss);
+            evalAcc.textContent = fmt(evaluation.accuracy);
+
+            if (imgs["curves_accuracy.png"]) imgAcc.src = imgs["curves_accuracy.png"];
+            if (imgs["curves_loss.png"]) imgLoss.src = imgs["curves_loss.png"];
+            if (imgs["confusion_matrix.png"]) imgCM.src = imgs["confusion_matrix.png"];
+
+            reportBox.textContent = data.report || "(no report.txt)";
+        }
+
+        document.getElementById("btnRefresh").addEventListener("click", refreshRuns);
+        datasetSelect.addEventListener("change", refreshRuns);
+
+        (async function init() {
+            await loadDatasets();
+            await refreshRuns();
+        })();
+    </script>
+
+</body>
+
+</html>

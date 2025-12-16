@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}EDA{% endblock %}
+
+{% block content %}
+<h3>Exploratory Data Analysis (EDA)</h3>
+
+<button id="startEdaBtn" class="btn btn-primary mt-2">
+  ▶ Start EDA (APTOS + DRTiD)
+</button>
+
+<div class="progress mt-3">
+  <div id="edaProgress" class="progress-bar" style="width:0%">0%</div>
+</div>
+
+<pre id="edaLog" class="bg-dark text-light p-3 mt-3" style="height:200px; overflow:auto;"></pre>
+
+<div class="row mt-4">
+  <div class="col-md-6">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h5 class="fw-bold mb-3">APTOS</h5>
+        <div id="aptosBlock">No results yet.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-6">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h5 class="fw-bold mb-3">DRTiD</h5>
+        <div id="drtidBlock">No results yet.</div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+  const socket = io();
+
+  const logEl = document.getElementById("edaLog");
+  const bar = document.getElementById("edaProgress");
+
+  function appendLog(msg) {
+    logEl.textContent += msg + "\n";
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function fmt(v) {
+    // change undefined to null/None display
+    if (v === undefined || v === null) return "None";
+    return v;
+  }
+
+  function renderDataset(res) {
+    if (!res || res.status !== "ok") {
+      return `<div class="text-danger">❌ ${res ? (res.message || "EDA failed") : "No data"}</div>`;
+    }
+
+    let html = "";
+    if (res.histogram_b64) {
+      html += `<div class="mb-3">
+        <img src="data:image/png;base64,${res.histogram_b64}" class="img-fluid" />
+      </div>`;
+    } else {
+      html += `<div class="text-muted mb-3">No histogram (label column not detected).</div>`;
+    }
+
+    html += `<ul class="mb-0">
+      <li><b>Train CSV rows:</b> ${fmt(res.total_train_csv)}</li>
+      <li><b>Test CSV rows:</b> ${fmt(res.total_test_csv)}</li>
+      <li><b>Scanned train images:</b> ${fmt(res.scanned_train)}</li>
+      <li><b>Missing (scan):</b> ${fmt(res.missing_images_in_scan)}</li>
+      <li><b>Corrupted (scan):</b> ${fmt(res.corrupted_images_in_scan)}</li>
+      <li><b>Duplicates (scan):</b> ${fmt(res.duplicates_in_scan)}</li>
+      <li><b>Mean intensity:</b> ${fmt(res.mean_intensity)}</li>
+      <li><b>Mean saturation:</b> ${fmt(res.mean_saturation)}</li>
+      <li><b>Mean contrast:</b> ${fmt(res.mean_contrast)}</li>
+    </ul>`;
+
+    return html;
+  }
+
+  document.getElementById("startEdaBtn").onclick = () => {
+    bar.style.width = "0%";
+    bar.textContent = "0%";
+    appendLog("▶ Starting EDA…");
+
+    fetch("/api/eda/summary", { method: "POST" })
+      .then(r => r.json())
+      .then(d => appendLog(d.message || "EDA started."))
+      .catch(e => appendLog("❌ " + e));
+  };
+
+  socket.on("eda_log", data => appendLog(data.message || ""));
+
+  // (Optional) If you add eda_progress emits later, this will work automatically
+  socket.on("eda_progress", data => {
+    const p = Math.max(0, Math.min(100, parseInt(data.progress || 0)));
+    bar.style.width = p + "%";
+    bar.textContent = p + "%";
+    if (data.message) appendLog(data.message);
+  });
+
+  socket.on("eda_done", data => {
+    const results = data.results || {};
+    document.getElementById("aptosBlock").innerHTML = renderDataset(results.aptos);
+    document.getElementById("drtidBlock").innerHTML = renderDataset(results.drtid);
+
+    bar.style.width = "100%";
+    bar.textContent = "100%";
+    appendLog("✅ EDA results rendered (APTOS + DRTiD).");
+  });
+
+  socket.on("eda_error", data => appendLog("❌ " + (data.message || "EDA error")));
+</script>
+{% endblock %}

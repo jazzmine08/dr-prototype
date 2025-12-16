@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>DR Ensemble - Preprocessing</title>
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      background: #fafafa;
+    }
+
+    header {
+      background: #111827;
+      color: white;
+      padding: 14px 20px;
+    }
+
+    .brand {
+      font-size: 18px;
+      font-weight: 700;
+      margin-right: 18px;
+    }
+
+    nav {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    nav a {
+      color: #e5e7eb;
+      text-decoration: none;
+      padding: 8px 10px;
+      border-radius: 10px;
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    nav a:hover {
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    nav a.active {
+      background: rgba(255, 255, 255, 0.16);
+      color: #fff;
+    }
+
+    main {
+      padding: 22px;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    .row {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .card {
+      background: white;
+      border: 1px solid #e5e7eb;
+      border-radius: 14px;
+      padding: 16px;
+      margin-top: 16px;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+    }
+
+    .muted {
+      color: #6b7280;
+    }
+
+    .log {
+      height: 340px;
+      overflow: auto;
+      background: #0b0f14;
+      color: #d8e1ff;
+      padding: 12px;
+      border-radius: 12px;
+      font-family: Consolas, monospace;
+      font-size: 13px;
+    }
+
+    button {
+      padding: 10px 14px;
+      border: 0;
+      border-radius: 12px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    button.primary {
+      background: #2563eb;
+      color: white;
+    }
+
+    button.secondary {
+      background: #e5e7eb;
+      color: #111827;
+    }
+
+    select,
+    input {
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid #d1d5db;
+      background: white;
+    }
+
+    h1 {
+      margin: 0 0 6px 0;
+      font-size: 22px;
+    }
+
+    .status {
+      font-weight: 700;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: #eef2ff;
+      color: #3730a3;
+      font-weight: 700;
+      font-size: 12px;
+    }
+  </style>
+
+  <!-- Socket.IO client -->
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+</head>
+
+<body>
+
+  <header>
+    <div class="row" style="justify-content: space-between;">
+      <div class="row">
+        <div class="brand">DR Ensemble</div>
+        <nav>
+          <a href="/">Home</a>
+          <a href="/preprocessing" class="active">Preprocessing</a>
+          <a href="/eda">EDA</a>
+          <a href="/training">Training</a>
+          <a href="/ensemble">Ensemble</a>
+          <a href="/results">Results</a>
+        </nav>
+      </div>
+      <div class="pill">Dataset Preprocessing</div>
+    </div>
+  </header>
+
+  <main>
+    <h1>Preprocessing</h1>
+    <p class="muted" style="margin-top:0;">
+      Select dataset (APTOS 2019 or DRTiD) and run preprocessing to generate standardized images for training.
+    </p>
+
+    <div class="card">
+      <div class="row">
+        <label for="datasetSelect"><b>Dataset:</b></label>
+        <select id="datasetSelect"></select>
+
+        <label for="limitInput" class="muted">Limit (optional):</label>
+        <input id="limitInput" type="number" min="1" placeholder="e.g., 200 (debug)" style="width: 170px;" />
+
+        <button class="primary" id="btnStart">Start Preprocessing</button>
+        <button class="secondary" id="btnClear">Clear Log</button>
+      </div>
+
+      <p class="muted" style="margin-top: 12px; margin-bottom: 6px;">
+        Source: <b id="sourceName">-</b> &nbsp;&nbsp;|&nbsp;&nbsp;
+        Output: <b id="outputPath">-</b>
+      </p>
+
+      <p class="status" id="statusText">Status: idle</p>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Logs</h3>
+      <div id="logBox" class="log"></div>
+    </div>
+  </main>
+
+  <script>
+    const logBox = document.getElementById("logBox");
+    const datasetSelect = document.getElementById("datasetSelect");
+    const statusText = document.getElementById("statusText");
+    const sourceName = document.getElementById("sourceName");
+    const outputPath = document.getElementById("outputPath");
+    const limitInput = document.getElementById("limitInput");
+
+    const socket = io(); // connects to same host/port
+
+    function addLog(msg) {
+      const ts = new Date().toLocaleTimeString();
+      logBox.innerHTML += `[${ts}] ${msg}<br/>`;
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function niceDatasetName(ds) {
+      if (ds === "aptos2019") return "Google Drive for Desktop (APTOS 2019)";
+      if (ds === "drtid") return "Google Drive for Desktop (DRTiD)";
+      return ds;
+    }
+
+    function updateSourceLine() {
+      const ds = datasetSelect.value || "aptos2019";
+      sourceName.textContent = niceDatasetName(ds);
+      // Matches backend output structure:
+      // G:\My Drive\dr_prototype\processed\<dataset>\processed_final\
+      outputPath.textContent = `G:\\My Drive\\dr_prototype\\processed\\${ds}\\processed_final\\`;
+    }
+
+    async function loadDatasets() {
+      const res = await fetch("/datasets");
+      const data = await res.json();
+      datasetSelect.innerHTML = "";
+
+      (data.datasets || []).forEach(ds => {
+        const opt = document.createElement("option");
+        opt.value = ds;
+        // nicer label in UI
+        opt.textContent = (ds === "aptos2019") ? "APTOS 2019" : (ds === "drtid") ? "DRTiD" : ds;
+        datasetSelect.appendChild(opt);
+      });
+
+      // default selection
+      if ([...datasetSelect.options].some(o => o.value === "aptos2019")) {
+        datasetSelect.value = "aptos2019";
+      }
+      updateSourceLine();
+    }
+
+    datasetSelect.addEventListener("change", updateSourceLine);
+
+    document.getElementById("btnClear").addEventListener("click", () => {
+      logBox.innerHTML = "";
+      statusText.textContent = "Status: idle";
+    });
+
+    document.getElementById("btnStart").addEventListener("click", async () => {
+      const ds = datasetSelect.value || "aptos2019";
+      const limitVal = limitInput.value && Number(limitInput.value) > 0 ? Number(limitInput.value) : null;
+
+      statusText.textContent = `Status: starting preprocessing (${ds})...`;
+      addLog(`▶️ Requesting preprocessing for dataset=${ds}${limitVal ? " limit=" + limitVal : ""}`);
+
+      const payload = { dataset: ds };
+      if (limitVal) payload.limit = limitVal;
+
+      const resp = await fetch("/start_preprocessing", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      const out = await resp.json();
+      if (out.status === "ok") {
+        statusText.textContent = `Status: running (${ds})`;
+        addLog(`✅ ${out.message}`);
+      } else {
+        statusText.textContent = `Status: error`;
+        addLog(`❌ ${out.message || "Unknown error"}`);
+      }
+    });
+
+    // Socket events from backend
+    socket.on("preprocess_log", (data) => addLog(data.message || ""));
+    socket.on("preprocess_error", (data) => {
+      statusText.textContent = "Status: error";
+      addLog(data.message || "❌ error");
+    });
+    socket.on("preprocess_done", (data) => {
+      statusText.textContent = "Status: done";
+      addLog(data.message || "✅ done");
+    });
+
+    // init
+    loadDatasets().catch(err => {
+      addLog("❌ Failed to load datasets: " + err);
+    });
+  </script>
+
+</body>
+
+</html>
