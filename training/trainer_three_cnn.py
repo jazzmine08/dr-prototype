@@ -98,6 +98,7 @@ def _train_one_backbone(socketio, cfg: tcnn.TrainConfig, backbone_name: str, dat
     # 4) Callbacks
     # IMPORTANT: weights-only checkpoint (avoids Lambda deserialization issues)
     best_weights_path = run_dir / "best.weights.h5"
+    last_weights_path = run_dir / "last.weights.h5"   # ✅ tambah ini
     log_csv_path = run_dir / "train_log.csv"
 
     callbacks = [
@@ -180,8 +181,9 @@ def _train_one_backbone(socketio, cfg: tcnn.TrainConfig, backbone_name: str, dat
     if best_weights_path.exists():
         best_model.load_weights(str(best_weights_path))
     else:
-        # fallback: if checkpoint wasn't written for any reason, use current model weights
         best_model.set_weights(model.get_weights())
+        # IMPORTANT: persist fallback weights so ensemble can load it later
+        best_model.save_weights(str(best_weights_path))
 
     # compile is optional for predict-based eval, but safe to keep
     best_model.compile(

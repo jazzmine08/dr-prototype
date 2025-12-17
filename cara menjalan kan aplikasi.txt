@@ -16,3 +16,8 @@ how to run if all is ready:
 cmd -> 
 venv\Scripts\activate
 python app.py
+
+cara running pakai GPU:
+venv_tf\Scripts\activate
+python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))" 
+python app.py
