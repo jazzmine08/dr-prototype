@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.venv_tf/
+venv_tf/
+models/

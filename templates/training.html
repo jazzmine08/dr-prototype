@@ -150,16 +150,9 @@
       font-weight: 700;
       font-size: 12px;
     }
-
-    .inline {
-      width: auto;
-    }
-
-    .wide {
-      width: 260px;
-    }
   </style>
 
+  <!-- Socket.IO (optional). Kalau CDN gagal, halaman tetap jalan. -->
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 </head>
 
@@ -210,7 +203,6 @@
               <option value="densenet">DenseNet</option>
               <option value="inceptionresnet">InceptionResNet</option>
             </select>
-
           </div>
         </div>
       </div>
@@ -244,31 +236,24 @@
           <label>Dropout</label>
           <input id="dropout" type="number" step="0.01" min="0" max="0.9" value="0.3" />
         </div>
-        <div>
-
-        </div>
-
-        <div class="row" style="margin-top:14px;">
-          <button class="primary" id="btnStart">Start Training</button>
-          <button class="secondary" id="btnClear">Clear Log</button>
-          <div class="status" id="statusText" style="margin-left:8px;">Status: idle</div>
-        </div>
+        <div></div>
       </div>
 
-      <div class="card">
-        <h3 style="margin-top:0;">Training Logs</h3>
-        <div id="logBox" class="log"></div>
+      <div class="row" style="margin-top:14px;">
+        <button class="primary" id="btnStart">Start Training</button>
+        <button class="secondary" id="btnClear">Clear Log</button>
+        <div class="status" id="statusText" style="margin-left:8px;">Status: idle</div>
       </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Training Logs</h3>
+      <div id="logBox" class="log"></div>
+    </div>
   </main>
 
   <script>
-    const socket = io();
-
-    const datasetSelect = document.getElementById("datasetSelect");
-    const trainMode = document.getElementById("trainMode");
-    const singleModelWrap = document.getElementById("singleModelWrap");
-    const modelName = document.getElementById("modelName");
-
+    // --- helpers ---
     const logBox = document.getElementById("logBox");
     const statusText = document.getElementById("statusText");
 
@@ -282,102 +267,142 @@
       statusText.textContent = "Status: " + s;
     }
 
-
-    async function loadDatasets() {
-      const res = await fetch("/datasets");
-      const data = await res.json();
-      datasetSelect.innerHTML = "";
-      (data.datasets || []).forEach(ds => {
-        const opt = document.createElement("option");
-        opt.value = ds;
-        opt.textContent = (ds === "aptos2019") ? "APTOS 2019" : (ds === "drtid") ? "DRTiD" : ds;
-        datasetSelect.appendChild(opt);
-      });
-
-      if ([...datasetSelect.options].some(o => o.value === "aptos2019")) {
-        datasetSelect.value = "aptos2019";
-      }
-
+    // --- Socket.IO optional (biar JS gak crash kalau CDN gagal) ---
+    const socket = (window.io) ? io() : null;
+    if (!socket) {
+      addLog("⚠️ Socket.IO not loaded. Page will still work, but realtime logs may not appear.");
     }
 
+    // --- DOM elements ---
+    const datasetSelect = document.getElementById("datasetSelect");
+    const trainMode = document.getElementById("trainMode");
+    const singleModelWrap = document.getElementById("singleModelWrap");
+    const modelName = document.getElementById("modelName");
+    const btnStart = document.getElementById("btnStart");
+    const btnClear = document.getElementById("btnClear");
 
+    // --- load datasets ---
+    async function loadDatasets() {
+      try {
+        const res = await fetch("/datasets");
+        if (!res.ok) throw new Error(`GET /datasets failed (${res.status})`);
+        const data = await res.json();
+
+        datasetSelect.innerHTML = "";
+        (data.datasets || []).forEach(ds => {
+          const opt = document.createElement("option");
+          opt.value = ds;
+          opt.textContent = (ds === "aptos2019") ? "APTOS 2019"
+            : (ds === "drtid") ? "DRTiD"
+              : ds;
+          datasetSelect.appendChild(opt);
+        });
+
+        if ([...datasetSelect.options].some(o => o.value === "aptos2019")) {
+          datasetSelect.value = "aptos2019";
+        } else if (datasetSelect.options.length > 0) {
+          datasetSelect.value = datasetSelect.options[0].value;
+        }
+
+        addLog(`✅ Loaded datasets: ${(data.datasets || []).join(", ") || "(none)"}`);
+      } catch (err) {
+        addLog("❌ Failed to load datasets: " + err.message);
+        setStatus("error");
+      }
+    }
+
+    // --- mode toggle ---
     trainMode.addEventListener("change", () => {
       singleModelWrap.style.display = (trainMode.value === "single") ? "block" : "none";
     });
 
-    document.getElementById("btnClear").addEventListener("click", () => {
+    // --- clear log ---
+    btnClear.addEventListener("click", () => {
       logBox.innerHTML = "";
       setStatus("idle");
+      addLog("🧹 Log cleared.");
     });
 
-    document.getElementById("btnStart").addEventListener("click", async () => {
-      const ds = datasetSelect.value || "aptos2019";
+    // --- start training ---
+    btnStart.addEventListener("click", async () => {
+      try {
+        const ds = datasetSelect.value || "aptos2019";
 
-      const payload = {
-        dataset: ds,
-        epochs: Number(document.getElementById("epochs").value || 20),
-        batch_size: Number(document.getElementById("batchSize").value || 16),
-        img_size: Number(document.getElementById("imgSize").value || 224),
-        warmup_epochs: Number(document.getElementById("warmupEpochs").value || 2),
-        lr: Number(document.getElementById("lr").value || 1e-4),
-        fine_tune_lr: Number(document.getElementById("fineTuneLr").value || 1e-5),
-        dropout: Number(document.getElementById("dropout").value || 0.3),
-      };
+        const payload = {
+          dataset: ds,
+          epochs: Number(document.getElementById("epochs").value || 20),
+          batch_size: Number(document.getElementById("batchSize").value || 16),
+          img_size: Number(document.getElementById("imgSize").value || 224),
+          warmup_epochs: Number(document.getElementById("warmupEpochs").value || 2),
+          lr: Number(document.getElementById("lr").value || 1e-4),
+          fine_tune_lr: Number(document.getElementById("fineTuneLr").value || 1e-5),
+          dropout: Number(document.getElementById("dropout").value || 0.3),
+        };
 
-      // optional debug
-      const limitVal = document.getElementById("limit").value;
-      if (limitVal && Number(limitVal) > 0) payload.limit = Number(limitVal);
+        // OPTIONAL: kalau kamu nanti tambahin <input id="limit"> baru akan kepake
+        const limitEl = document.getElementById("limit");
+        if (limitEl && Number(limitEl.value) > 0) payload.limit = Number(limitEl.value);
 
-      // if single model, pass model name
-      if (trainMode.value === "single") {
-        payload.model = modelName.value;  // your backend can read this if you support it
-      }
-      // if your trainer expects another key (e.g. "model_name"), we can change it easily
+        if (trainMode.value === "single") {
+          payload.model = modelName.value;
+        }
 
-      setStatus(`starting training (${ds})...`);
-      addLog(`▶️ Training request: dataset=${ds}, mode=${trainMode.value}${trainMode.value === "single" ? ", model=" + modelName.value : ""}`);
+        setStatus(`starting training (${ds})...`);
+        addLog(`▶️ Training request: dataset=${ds}, mode=${trainMode.value}${trainMode.value === "single" ? ", model=" + modelName.value : ""}`);
 
-      const resp = await fetch("/start_training", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+        const resp = await fetch("/start_training", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
 
-      const out = await resp.json();
-      if (out.status === "ok") {
-        setStatus(`running (${ds})`);
-        addLog(`✅ ${out.message}`);
-        if (out.processed_dir) addLog(`📁 processed_dir used: ${out.processed_dir}`);
-      } else {
+        if (!resp.ok) {
+          const txt = await resp.text().catch(() => "");
+          throw new Error(`POST /start_training failed (${resp.status}). ${txt}`);
+        }
+
+        const out = await resp.json();
+
+        if (out.status === "ok") {
+          setStatus(`running (${ds})`);
+          addLog(`✅ ${out.message || "Training started."}`);
+          if (out.processed_dir) addLog(`📁 processed_dir used: ${out.processed_dir}`);
+        } else {
+          setStatus("error");
+          addLog(`❌ ${out.message || "Unknown error"}`);
+        }
+      } catch (err) {
         setStatus("error");
-        addLog(`❌ ${out.message || "Unknown error"}`);
+        addLog("❌ " + err.message);
       }
     });
 
-    // --- Socket listeners (support multiple possible event names) ---
-    const logEvents = ["train_log", "training_log", "log", "message"];
-    const errEvents = ["train_error", "training_error", "error"];
-    const doneEvents = ["train_done", "training_done", "done"];
+    // --- Socket listeners (optional) ---
+    if (socket) {
+      const logEvents = ["train_log", "training_log", "log", "message"];
+      const errEvents = ["train_error", "training_error", "error"];
+      const doneEvents = ["train_done", "training_done", "done"];
 
-    logEvents.forEach(ev => socket.on(ev, (data) => {
-      const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : JSON.stringify(data);
-      addLog(msg);
-    }));
+      logEvents.forEach(ev => socket.on(ev, (data) => {
+        const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : JSON.stringify(data);
+        addLog(msg);
+      }));
 
-    errEvents.forEach(ev => socket.on(ev, (data) => {
-      const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : JSON.stringify(data);
-      addLog("❌ " + msg);
-      setStatus("error");
-    }));
+      errEvents.forEach(ev => socket.on(ev, (data) => {
+        const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : JSON.stringify(data);
+        addLog("❌ " + msg);
+        setStatus("error");
+      }));
 
-    doneEvents.forEach(ev => socket.on(ev, (data) => {
-      const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : JSON.stringify(data);
-      addLog("✅ " + msg);
-      setStatus("done");
-    }));
+      doneEvents.forEach(ev => socket.on(ev, (data) => {
+        const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : JSON.stringify(data);
+        addLog("✅ " + msg);
+        setStatus("done");
+      }));
+    }
 
     // init
-    loadDatasets().catch(err => addLog("❌ Failed to load datasets: " + err));
+    loadDatasets();
   </script>
 
 </body>
