@@ -105,6 +105,11 @@
       color: #111827;
     }
 
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
     select,
     input {
       padding: 10px 12px;
@@ -129,6 +134,59 @@
       background: #eef2ff;
       color: #3730a3;
       font-weight: 700;
+      font-size: 12px;
+    }
+
+    .progress-wrap {
+      background: #e5e7eb;
+      border-radius: 999px;
+      height: 18px;
+      overflow: hidden;
+    }
+
+    .progress-bar {
+      height: 18px;
+      width: 0%;
+      background: #22c55e;
+      transition: width 150ms linear;
+    }
+
+    .samples-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    @media (max-width: 920px) {
+      .samples-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .sample-box {
+      border: 1px solid #e5e7eb;
+      border-radius: 14px;
+      padding: 12px;
+      background: #fff;
+    }
+
+    .sample-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+
+    .sample-img {
+      width: 220px;
+      height: 220px;
+      object-fit: cover;
+      border-radius: 12px;
+      border: 1px solid #e5e7eb;
+      background: #fff;
+    }
+
+    .tiny {
       font-size: 12px;
     }
   </style>
@@ -172,6 +230,7 @@
 
         <button class="primary" id="btnStart">Start Preprocessing</button>
         <button class="secondary" id="btnClear">Clear Log</button>
+        <button class="secondary" id="btnShowSamples" title="Load sample (original vs processed)">Show Samples</button>
       </div>
 
       <p class="muted" style="margin-top: 12px; margin-bottom: 6px;">
@@ -182,6 +241,50 @@
       <p class="status" id="statusText">Status: idle</p>
     </div>
 
+    <!-- Progress -->
+    <div class="card">
+      <h3 style="margin-top:0;">Progress</h3>
+      <div class="progress-wrap">
+        <div id="progressBar" class="progress-bar"></div>
+      </div>
+      <p class="muted" id="progressText" style="margin:10px 0 0 0;">0% (0 / 0)</p>
+    </div>
+
+    <!-- Samples -->
+    <div class="card">
+      <h3 style="margin-top:0;">Sample Verification (Original vs Processed)</h3>
+      <p class="muted" style="margin-top:0;">
+        Click <b>Show Samples</b> to load 1 sample per severity level (No DR, Moderate, Proliferative DR).
+      </p>
+
+      <div class="samples-grid">
+        <div class="sample-box">
+          <div class="row" style="justify-content: space-between;">
+            <b>No DR</b>
+            <span class="muted tiny" id="samples0Meta"></span>
+          </div>
+          <div id="samples0" class="sample-row"><span class="muted">Click “Show Samples”.</span></div>
+        </div>
+
+        <div class="sample-box">
+          <div class="row" style="justify-content: space-between;">
+            <b>Moderate</b>
+            <span class="muted tiny" id="samples2Meta"></span>
+          </div>
+          <div id="samples2" class="sample-row"><span class="muted">Click “Show Samples”.</span></div>
+        </div>
+
+        <div class="sample-box">
+          <div class="row" style="justify-content: space-between;">
+            <b>Proliferative DR</b>
+            <span class="muted tiny" id="samples4Meta"></span>
+          </div>
+          <div id="samples4" class="sample-row"><span class="muted">Click “Show Samples”.</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Logs -->
     <div class="card">
       <h3 style="margin-top:0;">Logs</h3>
       <div id="logBox" class="log"></div>
@@ -196,7 +299,14 @@
     const outputPath = document.getElementById("outputPath");
     const limitInput = document.getElementById("limitInput");
 
-    const socket = io(); // connects to same host/port
+    const btnStart = document.getElementById("btnStart");
+    const btnClear = document.getElementById("btnClear");
+    const btnShowSamples = document.getElementById("btnShowSamples");
+
+    const progressBar = document.getElementById("progressBar");
+    const progressText = document.getElementById("progressText");
+
+    const socket = io();
 
     function addLog(msg) {
       const ts = new Date().toLocaleTimeString();
@@ -213,9 +323,78 @@
     function updateSourceLine() {
       const ds = datasetSelect.value || "aptos2019";
       sourceName.textContent = niceDatasetName(ds);
-      // Matches backend output structure:
-      // G:\My Drive\dr_prototype\processed\<dataset>\processed_final\
       outputPath.textContent = `G:\\My Drive\\dr_prototype\\processed\\${ds}\\processed_final\\`;
+    }
+
+    function setProgress(pct, processed, total, phase) {
+      const safePct = Math.max(0, Math.min(100, Number(pct) || 0));
+      progressBar.style.width = safePct + "%";
+      progressText.textContent = `${safePct}% (${processed || 0} / ${total || 0})${phase ? " - " + phase : ""}`;
+    }
+
+    function resetProgress() {
+      setProgress(0, 0, 0, "");
+    }
+
+    function renderSamplePair(containerId, metaId, sample, ds) {
+      const el = document.getElementById(containerId);
+      const meta = document.getElementById(metaId);
+
+      el.innerHTML = "";
+      meta.textContent = "";
+
+      if (!sample || (!sample.original && !sample.processed)) {
+        el.innerHTML = `<span class="muted">No images yet.</span>`;
+        meta.textContent = `${ds}`;
+        return;
+      }
+
+      const wrap = document.createElement("div");
+      wrap.style.display = "flex";
+      wrap.style.gap = "10px";
+      wrap.style.flexWrap = "wrap";
+
+      const makeBlock = (title, src) => {
+        const block = document.createElement("div");
+        block.style.display = "flex";
+        block.style.flexDirection = "column";
+        block.style.gap = "6px";
+
+        const cap = document.createElement("span");
+        cap.className = "muted tiny";
+        cap.textContent = title;
+
+        const img = document.createElement("img");
+        img.src = src || "";
+        img.className = "sample-img";
+
+        block.appendChild(cap);
+        block.appendChild(img);
+        return block;
+      };
+
+      if (sample.original) wrap.appendChild(makeBlock("Original", sample.original));
+      if (sample.processed) wrap.appendChild(makeBlock("Processed", sample.processed));
+
+      el.appendChild(wrap);
+
+      meta.textContent = `${ds}${sample.image_id ? " | " + sample.image_id : ""}`;
+    }
+
+    async function loadSamples(ds) {
+      const url = `/preprocess_samples?dataset=${encodeURIComponent(ds)}`;
+      const res = await fetch(url);
+      const data = await res.json();
+
+      const samples = (data && data.samples) ? data.samples : [];
+
+      const s0 = samples.find(s => Number(s.class) === 0);
+      const s2 = samples.find(s => Number(s.class) === 2);
+      const s4 = samples.find(s => Number(s.class) === 4);
+
+      renderSamplePair("samples0", "samples0Meta", s0, ds);
+      renderSamplePair("samples2", "samples2Meta", s2, ds);
+      renderSamplePair("samples4", "samples4Meta", s4, ds);
     }
 
     async function loadDatasets() {
@@ -226,63 +405,101 @@
       (data.datasets || []).forEach(ds => {
         const opt = document.createElement("option");
         opt.value = ds;
-        // nicer label in UI
         opt.textContent = (ds === "aptos2019") ? "APTOS 2019" : (ds === "drtid") ? "DRTiD" : ds;
         datasetSelect.appendChild(opt);
       });
 
-      // default selection
       if ([...datasetSelect.options].some(o => o.value === "aptos2019")) {
         datasetSelect.value = "aptos2019";
       }
+
       updateSourceLine();
     }
 
     datasetSelect.addEventListener("change", updateSourceLine);
 
-    document.getElementById("btnClear").addEventListener("click", () => {
+    btnClear.addEventListener("click", () => {
       logBox.innerHTML = "";
       statusText.textContent = "Status: idle";
+      resetProgress();
     });
 
-    document.getElementById("btnStart").addEventListener("click", async () => {
+    btnShowSamples.addEventListener("click", async () => {
+      const ds = datasetSelect.value || "aptos2019";
+      btnShowSamples.disabled = true;
+      addLog(`🖼️ Loading samples for ${ds}...`);
+      try {
+        await loadSamples(ds);
+        addLog(`✅ Samples loaded.`);
+      } catch (e) {
+        addLog("❌ Failed to load samples: " + e);
+      } finally {
+        btnShowSamples.disabled = false;
+      }
+    });
+
+    btnStart.addEventListener("click", async () => {
       const ds = datasetSelect.value || "aptos2019";
       const limitVal = limitInput.value && Number(limitInput.value) > 0 ? Number(limitInput.value) : null;
 
+      resetProgress();
       statusText.textContent = `Status: starting preprocessing (${ds})...`;
       addLog(`▶️ Requesting preprocessing for dataset=${ds}${limitVal ? " limit=" + limitVal : ""}`);
+
+      btnStart.disabled = true;
 
       const payload = { dataset: ds };
       if (limitVal) payload.limit = limitVal;
 
-      const resp = await fetch("/start_preprocessing", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
+      try {
+        const resp = await fetch("/start_preprocessing", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
 
-      const out = await resp.json();
-      if (out.status === "ok") {
-        statusText.textContent = `Status: running (${ds})`;
-        addLog(`✅ ${out.message}`);
-      } else {
+        const out = await resp.json();
+        if (out.status === "ok") {
+          statusText.textContent = `Status: running (${ds})`;
+          addLog(`✅ ${out.message}`);
+        } else {
+          statusText.textContent = `Status: error`;
+          addLog(`❌ ${out.message || "Unknown error"}`);
+          btnStart.disabled = false;
+        }
+      } catch (e) {
         statusText.textContent = `Status: error`;
-        addLog(`❌ ${out.message || "Unknown error"}`);
+        addLog(`❌ Failed to start preprocessing: ${e}`);
+        btnStart.disabled = false;
       }
     });
 
     // Socket events from backend
+    socket.on("connect", () => addLog("🔌 Socket connected."));
+    socket.on("disconnect", () => addLog("⚠️ Socket disconnected."));
     socket.on("preprocess_log", (data) => addLog(data.message || ""));
+
+    socket.on("preprocess_progress", (data) => {
+      const pct = (data && data.percent != null) ? data.percent : 0;
+      const processed = (data && data.processed != null) ? data.processed : 0;
+      const total = (data && data.total != null) ? data.total : 0;
+      const phase = (data && data.phase) ? data.phase : "";
+      setProgress(pct, processed, total, phase);
+    });
+
     socket.on("preprocess_error", (data) => {
       statusText.textContent = "Status: error";
       addLog(data.message || "❌ error");
+      btnStart.disabled = false;
     });
+
     socket.on("preprocess_done", (data) => {
       statusText.textContent = "Status: done";
       addLog(data.message || "✅ done");
+      btnStart.disabled = false;
     });
 
-    // init
+    // init (no auto-sample load)
     loadDatasets().catch(err => {
       addLog("❌ Failed to load datasets: " + err);
     });

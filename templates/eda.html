@@ -19,7 +19,7 @@
     <div class="card shadow-sm">
       <div class="card-body">
         <h5 class="fw-bold mb-3">APTOS</h5>
-        <div id="aptosBlock">No results yet.</div>
+        <div id="aptosBlock">Click “Start EDA”.</div>
       </div>
     </div>
   </div>
@@ -28,7 +28,7 @@
     <div class="card shadow-sm">
       <div class="card-body">
         <h5 class="fw-bold mb-3">DRTiD</h5>
-        <div id="drtidBlock">No results yet.</div>
+        <div id="drtidBlock">Click “Start EDA”.</div>
       </div>
     </div>
   </div>
@@ -36,10 +36,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script>
-  const socket = io();
-
   const logEl = document.getElementById("edaLog");
   const bar = document.getElementById("edaProgress");
 
@@ -48,72 +45,98 @@
     logEl.scrollTop = logEl.scrollHeight;
   }
 
-  function fmt(v) {
-    // change undefined to null/None display
-    if (v === undefined || v === null) return "None";
-    return v;
+  function setProgress(p) {
+    const pct = Math.max(0, Math.min(100, Number(p) || 0));
+    bar.style.width = pct + "%";
+    bar.textContent = pct + "%";
   }
 
-  function renderDataset(res) {
+  function renderDataset(res, title) {
     if (!res || res.status !== "ok") {
-      return `<div class="text-danger">❌ ${res ? (res.message || "EDA failed") : "No data"}</div>`;
+      return `<div class="text-danger">❌ ${title}: ${res ? (res.message || "EDA failed") : "No data"}</div>`;
     }
 
     let html = "";
-    if (res.histogram_b64) {
-      html += `<div class="mb-3">
-        <img src="data:image/png;base64,${res.histogram_b64}" class="img-fluid" />
-      </div>`;
+
+    // Chart (backend returns chart_b64)
+    if (res.chart_b64) {
+      html += `
+        <div class="mb-3">
+          <img src="data:image/png;base64,${res.chart_b64}" class="img-fluid" />
+        </div>
+      `;
     } else {
-      html += `<div class="text-muted mb-3">No histogram (label column not detected).</div>`;
+      html += `<div class="text-muted mb-3">No chart available.</div>`;
     }
 
-    html += `<ul class="mb-0">
-      <li><b>Train CSV rows:</b> ${fmt(res.total_train_csv)}</li>
-      <li><b>Test CSV rows:</b> ${fmt(res.total_test_csv)}</li>
-      <li><b>Scanned train images:</b> ${fmt(res.scanned_train)}</li>
-      <li><b>Missing (scan):</b> ${fmt(res.missing_images_in_scan)}</li>
-      <li><b>Corrupted (scan):</b> ${fmt(res.corrupted_images_in_scan)}</li>
-      <li><b>Duplicates (scan):</b> ${fmt(res.duplicates_in_scan)}</li>
-      <li><b>Mean intensity:</b> ${fmt(res.mean_intensity)}</li>
-      <li><b>Mean saturation:</b> ${fmt(res.mean_saturation)}</li>
-      <li><b>Mean contrast:</b> ${fmt(res.mean_contrast)}</li>
-    </ul>`;
+    html += `
+      <ul class="mb-3">
+        <li><b>Rows (train.csv):</b> ${res.num_rows ?? "None"}</li>
+      </ul>
+    `;
+
+    // Label counts
+    if (res.label_counts) {
+      const items = Object.entries(res.label_counts)
+        .sort((a, b) => Number(a[0]) - Number(b[0]))
+        .map(([k, v]) => `<li>Class ${k}: ${v}</li>`)
+        .join("");
+      html += `
+        <div class="mb-2"><b>Label counts:</b></div>
+        <ul class="mb-3">${items}</ul>
+      `;
+    }
+
+    // Samples (image_b64)
+    if (Array.isArray(res.samples) && res.samples.length > 0) {
+      const thumbs = res.samples.map(s => `
+        <div style="display:inline-block; margin:6px; text-align:center;">
+          <img
+            src="data:image/png;base64,${s.image_b64}"
+            style="width:120px; height:120px; object-fit:cover; border-radius:10px; border:1px solid #e5e7eb;"
+          />
+          <div class="text-muted" style="font-size:12px;">Class ${s.label}</div>
+        </div>
+      `).join("");
+      html += `<div><b>Random samples:</b></div><div>${thumbs}</div>`;
+    } else {
+      html += `<div class="text-muted">No sample images returned.</div>`;
+    }
 
     return html;
   }
 
-  document.getElementById("startEdaBtn").onclick = () => {
-    bar.style.width = "0%";
-    bar.textContent = "0%";
-    appendLog("▶ Starting EDA…");
+  async function fetchEda(dataset) {
+    const resp = await fetch("/api/eda/summary", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dataset })
+    });
+    return await resp.json();
+  }
 
-    fetch("/api/eda/summary", { method: "POST" })
-      .then(r => r.json())
-      .then(d => appendLog(d.message || "EDA started."))
-      .catch(e => appendLog("❌ " + e));
+  document.getElementById("startEdaBtn").onclick = async () => {
+    setProgress(0);
+    logEl.textContent = "";
+    appendLog("▶ Starting EDA for APTOS + DRTiD...");
+
+    try {
+      setProgress(10);
+      const aptos = await fetchEda("aptos2019");
+      appendLog("✅ APTOS EDA fetched.");
+      document.getElementById("aptosBlock").innerHTML = renderDataset(aptos, "APTOS");
+
+      setProgress(60);
+      const drtid = await fetchEda("drtid");
+      appendLog("✅ DRTiD EDA fetched.");
+      document.getElementById("drtidBlock").innerHTML = renderDataset(drtid, "DRTiD");
+
+      setProgress(100);
+      appendLog("✅ EDA results rendered.");
+    } catch (e) {
+      appendLog("❌ EDA failed: " + e);
+      setProgress(0);
+    }
   };
-
-  socket.on("eda_log", data => appendLog(data.message || ""));
-
-  // (Optional) If you add eda_progress emits later, this will work automatically
-  socket.on("eda_progress", data => {
-    const p = Math.max(0, Math.min(100, parseInt(data.progress || 0)));
-    bar.style.width = p + "%";
-    bar.textContent = p + "%";
-    if (data.message) appendLog(data.message);
-  });
-
-  socket.on("eda_done", data => {
-    const results = data.results || {};
-    document.getElementById("aptosBlock").innerHTML = renderDataset(results.aptos);
-    document.getElementById("drtidBlock").innerHTML = renderDataset(results.drtid);
-
-    bar.style.width = "100%";
-    bar.textContent = "100%";
-    appendLog("✅ EDA results rendered (APTOS + DRTiD).");
-  });
-
-  socket.on("eda_error", data => appendLog("❌ " + (data.message || "EDA error")));
 </script>
 {% endblock %}
