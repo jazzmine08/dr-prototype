@@ -1,410 +1,278 @@
-<!doctype html>
-<html lang="en">
+{% extends "base.html" %}
+{% block title %}Training — DR Ensemble{% endblock %}
 
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>DR Ensemble - Training</title>
+{% block content %}
+<h3 class="mb-2">Training</h3>
+<p class="text-muted mt-0">
+  Choose dataset (APTOS 2019 or DRTiD), set parameters, and start training.
+</p>
 
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 0;
-      background: #fafafa;
-    }
+<style>
+  /* page-specific styles only (safe with base.html) */
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
 
-    header {
-      background: #111827;
-      color: white;
-      padding: 14px 20px;
-    }
-
-    .brand {
-      font-size: 18px;
-      font-weight: 700;
-      margin-right: 18px;
-    }
-
-    nav {
-      display: flex;
-      gap: 12px;
-      align-items: center;
-      flex-wrap: wrap;
-    }
-
-    nav a {
-      color: #e5e7eb;
-      text-decoration: none;
-      padding: 8px 10px;
-      border-radius: 10px;
-      font-weight: 600;
-      font-size: 14px;
-    }
-
-    nav a:hover {
-      background: rgba(255, 255, 255, 0.08);
-    }
-
-    nav a.active {
-      background: rgba(255, 255, 255, 0.16);
-      color: #fff;
-    }
-
-    main {
-      padding: 22px;
-      max-width: 1100px;
-      margin: 0 auto;
-    }
-
-    .row {
-      display: flex;
-      gap: 12px;
-      align-items: center;
-      flex-wrap: wrap;
-    }
-
+  @media (max-width: 900px) {
     .grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
+      grid-template-columns: 1fr;
     }
+  }
 
-    @media (max-width: 900px) {
-      .grid {
-        grid-template-columns: 1fr;
-      }
-    }
+  .log {
+    height: 360px;
+    overflow: auto;
+    background: #0b0f14;
+    color: #d8e1ff;
+    padding: 12px;
+    border-radius: 12px;
+    font-family: Consolas, monospace;
+    font-size: 13px;
+  }
 
-    .card {
-      background: white;
-      border: 1px solid #e5e7eb;
-      border-radius: 14px;
-      padding: 16px;
-      margin-top: 16px;
-      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
-    }
+  label {
+    font-weight: 700;
+    font-size: 13px;
+  }
 
-    .muted {
-      color: #6b7280;
-    }
+  .status {
+    font-weight: 800;
+  }
 
-    .log {
-      height: 360px;
-      overflow: auto;
-      background: #0b0f14;
-      color: #d8e1ff;
-      padding: 12px;
-      border-radius: 12px;
-      font-family: Consolas, monospace;
-      font-size: 13px;
-    }
+  /* Make inputs look consistent even if base uses Bootstrap */
+  select,
+  input {
+    width: 100%;
+    box-sizing: border-box;
+  }
+</style>
 
-    button {
-      padding: 10px 14px;
-      border: 0;
-      border-radius: 12px;
-      cursor: pointer;
-      font-weight: 700;
-    }
-
-    button.primary {
-      background: #16a34a;
-      color: white;
-    }
-
-    button.secondary {
-      background: #e5e7eb;
-      color: #111827;
-    }
-
-    select,
-    input {
-      padding: 10px 12px;
-      border-radius: 12px;
-      border: 1px solid #d1d5db;
-      background: white;
-      width: 100%;
-      box-sizing: border-box;
-    }
-
-    label {
-      font-weight: 700;
-      font-size: 13px;
-    }
-
-    h1 {
-      margin: 0 0 6px 0;
-      font-size: 22px;
-    }
-
-    .status {
-      font-weight: 800;
-    }
-
-    .pill {
-      display: inline-block;
-      padding: 4px 10px;
-      border-radius: 999px;
-      background: #ecfeff;
-      color: #155e75;
-      font-weight: 700;
-      font-size: 12px;
-    }
-  </style>
-
-  <!-- Socket.IO (optional). Kalau CDN gagal, halaman tetap jalan. -->
-  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-</head>
-
-<body>
-
-  <header>
-    <div class="row" style="justify-content: space-between;">
-      <div class="row">
-        <div class="brand">DR Ensemble</div>
-        <nav>
-          <a href="/">Home</a>
-          <a href="/preprocessing">Preprocessing</a>
-          <a href="/eda">EDA</a>
-          <a href="/training" class="active">Training</a>
-          <a href="/ensemble">Ensemble</a>
-          <a href="/results">Results</a>
-        </nav>
-      </div>
-      <div class="pill">Train CNN Models</div>
-    </div>
-  </header>
-
-  <main>
-    <h1>Training</h1>
-    <p class="muted" style="margin-top:0;">
-      Choose dataset (APTOS 2019 or DRTiD), set parameters, and start training.
-    </p>
-
-    <div class="card">
-      <div class="grid">
-        <div>
-          <label>Dataset</label>
-          <select id="datasetSelect"></select>
-        </div>
-
-        <div>
-          <label>Train Mode</label>
-          <select id="trainMode">
-            <option value="all">Train ALL 3 CNN</option>
-            <option value="single">Train SINGLE model</option>
-          </select>
-
-          <div id="singleModelWrap" style="margin-top:12px; display:none;">
-            <label>Model Name (single)</label>
-            <select id="modelName">
-              <!-- match your trainer's expected names if needed -->
-              <option value="efficientnet">EfficientNet</option>
-              <option value="densenet">DenseNet</option>
-              <option value="inceptionresnet">InceptionResNet</option>
-            </select>
-          </div>
-        </div>
-      </div>
-
-      <div class="grid" style="margin-top:12px;">
-        <div>
-          <label>Epochs</label>
-          <input id="epochs" type="number" min="1" value="20" />
-        </div>
-        <div>
-          <label>Batch Size</label>
-          <input id="batchSize" type="number" min="1" value="16" />
-        </div>
-        <div>
-          <label>Image Size</label>
-          <input id="imgSize" type="number" min="32" value="224" />
-        </div>
-        <div>
-          <label>Warmup Epochs</label>
-          <input id="warmupEpochs" type="number" min="0" value="2" />
-        </div>
-        <div>
-          <label>LR</label>
-          <input id="lr" type="number" step="0.000001" value="0.0001" />
-        </div>
-        <div>
-          <label>Fine-tune LR</label>
-          <input id="fineTuneLr" type="number" step="0.000001" value="0.00001" />
-        </div>
-        <div>
-          <label>Dropout</label>
-          <input id="dropout" type="number" step="0.01" min="0" max="0.9" value="0.3" />
-        </div>
-        <div></div>
-      </div>
-
-      <div class="row" style="margin-top:14px;">
-        <button class="primary" id="btnStart">Start Training</button>
-        <button class="secondary" id="btnClear">Clear Log</button>
-        <div class="status" id="statusText" style="margin-left:8px;">Status: idle</div>
-      </div>
+<div class="card shadow-sm p-3">
+  <div class="grid">
+    <div>
+      <label>Dataset</label>
+      <select id="datasetSelect" class="form-select"></select>
     </div>
 
-    <div class="card">
-      <h3 style="margin-top:0;">Training Logs</h3>
-      <div id="logBox" class="log"></div>
+    <div>
+      <label>Train Mode</label>
+      <select id="trainMode" class="form-select">
+        <option value="all">Train ALL 3 CNN</option>
+        <option value="single">Train SINGLE model</option>
+      </select>
+
+      <div id="singleModelWrap" style="margin-top:12px; display:none;">
+        <label>Model Name (single)</label>
+        <select id="modelName" class="form-select">
+          <option value="efficientnet">EfficientNet</option>
+          <option value="densenet">DenseNet</option>
+          <option value="inceptionresnet">InceptionResNet</option>
+        </select>
+      </div>
     </div>
-  </main>
+  </div>
 
-  <script>
-    // --- helpers ---
-    const logBox = document.getElementById("logBox");
-    const statusText = document.getElementById("statusText");
+  <div class="grid mt-3">
+    <div>
+      <label>Epochs</label>
+      <input id="epochs" type="number" min="1" value="20" class="form-control" />
+    </div>
+    <div>
+      <label>Batch Size</label>
+      <input id="batchSize" type="number" min="1" value="16" class="form-control" />
+    </div>
+    <div>
+      <label>Image Size</label>
+      <input id="imgSize" type="number" min="32" value="224" class="form-control" />
+    </div>
+    <div>
+      <label>Warmup Epochs</label>
+      <input id="warmupEpochs" type="number" min="0" value="2" class="form-control" />
+    </div>
+    <div>
+      <label>LR</label>
+      <input id="lr" type="number" step="0.000001" value="0.0001" class="form-control" />
+    </div>
+    <div>
+      <label>Fine-tune LR</label>
+      <input id="fineTuneLr" type="number" step="0.000001" value="0.00001" class="form-control" />
+    </div>
+    <div>
+      <label>Dropout</label>
+      <input id="dropout" type="number" step="0.01" min="0" max="0.9" value="0.3" class="form-control" />
+    </div>
+    <div></div>
+  </div>
 
-    function addLog(msg) {
-      const ts = new Date().toLocaleTimeString();
-      logBox.innerHTML += `[${ts}] ${msg}<br/>`;
-      logBox.scrollTop = logBox.scrollHeight;
-    }
+  <div class="d-flex align-items-center gap-2 mt-3 flex-wrap">
+    <button class="btn btn-success" id="btnStart">Start Training</button>
+    <button class="btn btn-outline-secondary" id="btnClear">Clear Log</button>
+    <div class="status" id="statusText">Status: idle</div>
+  </div>
+</div>
 
-    function setStatus(s) {
-      statusText.textContent = "Status: " + s;
-    }
+<div class="card shadow-sm p-3 mt-3">
+  <h5 class="fw-bold mb-2">Training Logs</h5>
+  <div id="logBox" class="log"></div>
+</div>
+{% endblock %}
 
-    // --- Socket.IO optional (biar JS gak crash kalau CDN gagal) ---
-    const socket = (window.io) ? io() : null;
-    if (!socket) {
-      addLog("⚠️ Socket.IO not loaded. Page will still work, but realtime logs may not appear.");
-    }
+{% block scripts %}
+<!-- Socket.IO (optional). Kalau CDN gagal, halaman tetap jalan. -->
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 
-    // --- DOM elements ---
-    const datasetSelect = document.getElementById("datasetSelect");
-    const trainMode = document.getElementById("trainMode");
-    const singleModelWrap = document.getElementById("singleModelWrap");
-    const modelName = document.getElementById("modelName");
-    const btnStart = document.getElementById("btnStart");
-    const btnClear = document.getElementById("btnClear");
+<script>
+  // --- helpers ---
+  const logBox = document.getElementById("logBox");
+  const statusText = document.getElementById("statusText");
 
-    // --- load datasets ---
-    async function loadDatasets() {
-      try {
-        const res = await fetch("/datasets");
-        if (!res.ok) throw new Error(`GET /datasets failed (${res.status})`);
-        const data = await res.json();
+  function addLog(msg) {
+    const ts = new Date().toLocaleTimeString();
+    logBox.innerHTML += `[${ts}] ${msg}<br/>`;
+    logBox.scrollTop = logBox.scrollHeight;
+  }
 
-        datasetSelect.innerHTML = "";
-        (data.datasets || []).forEach(ds => {
-          const opt = document.createElement("option");
-          opt.value = ds;
-          opt.textContent = (ds === "aptos2019") ? "APTOS 2019"
-            : (ds === "drtid") ? "DRTiD"
-              : ds;
-          datasetSelect.appendChild(opt);
-        });
+  function setStatus(s) {
+    statusText.textContent = "Status: " + s;
+  }
 
-        if ([...datasetSelect.options].some(o => o.value === "aptos2019")) {
-          datasetSelect.value = "aptos2019";
-        } else if (datasetSelect.options.length > 0) {
-          datasetSelect.value = datasetSelect.options[0].value;
-        }
+  // --- Socket.IO optional (biar JS gak crash kalau CDN gagal) ---
+  const socket = (window.io) ? io() : null;
+  if (!socket) {
+    addLog("⚠️ Socket.IO not loaded. Page will still work, but realtime logs may not appear.");
+  }
 
-        addLog(`✅ Loaded datasets: ${(data.datasets || []).join(", ") || "(none)"}`);
-      } catch (err) {
-        addLog("❌ Failed to load datasets: " + err.message);
-        setStatus("error");
+  // --- DOM elements ---
+  const datasetSelect = document.getElementById("datasetSelect");
+  const trainMode = document.getElementById("trainMode");
+  const singleModelWrap = document.getElementById("singleModelWrap");
+  const modelName = document.getElementById("modelName");
+  const btnStart = document.getElementById("btnStart");
+  const btnClear = document.getElementById("btnClear");
+
+  // --- load datasets ---
+  async function loadDatasets() {
+    try {
+      const res = await fetch("/datasets");
+      if (!res.ok) throw new Error(`GET /datasets failed (${res.status})`);
+      const data = await res.json();
+
+      datasetSelect.innerHTML = "";
+      (data.datasets || []).forEach(ds => {
+        const opt = document.createElement("option");
+        opt.value = ds;
+        opt.textContent = (ds === "aptos2019") ? "APTOS 2019"
+          : (ds === "drtid") ? "DRTiD"
+            : ds;
+        datasetSelect.appendChild(opt);
+      });
+
+      if ([...datasetSelect.options].some(o => o.value === "aptos2019")) {
+        datasetSelect.value = "aptos2019";
+      } else if (datasetSelect.options.length > 0) {
+        datasetSelect.value = datasetSelect.options[0].value;
       }
+
+      addLog(`✅ Loaded datasets: ${(data.datasets || []).join(", ") || "(none)"}`);
+    } catch (err) {
+      addLog("❌ Failed to load datasets: " + err.message);
+      setStatus("error");
     }
+  }
 
-    // --- mode toggle ---
-    trainMode.addEventListener("change", () => {
-      singleModelWrap.style.display = (trainMode.value === "single") ? "block" : "none";
-    });
+  // --- mode toggle ---
+  trainMode.addEventListener("change", () => {
+    singleModelWrap.style.display = (trainMode.value === "single") ? "block" : "none";
+  });
 
-    // --- clear log ---
-    btnClear.addEventListener("click", () => {
-      logBox.innerHTML = "";
-      setStatus("idle");
-      addLog("🧹 Log cleared.");
-    });
+  // --- clear log ---
+  btnClear.addEventListener("click", () => {
+    logBox.innerHTML = "";
+    setStatus("idle");
+    addLog("🧹 Log cleared.");
+  });
 
-    // --- start training ---
-    btnStart.addEventListener("click", async () => {
-      try {
-        const ds = datasetSelect.value || "aptos2019";
+  // --- start training ---
+  btnStart.addEventListener("click", async () => {
+    try {
+      const ds = datasetSelect.value || "aptos2019";
 
-        const payload = {
-          dataset: ds,
-          epochs: Number(document.getElementById("epochs").value || 20),
-          batch_size: Number(document.getElementById("batchSize").value || 16),
-          img_size: Number(document.getElementById("imgSize").value || 224),
-          warmup_epochs: Number(document.getElementById("warmupEpochs").value || 2),
-          lr: Number(document.getElementById("lr").value || 1e-4),
-          fine_tune_lr: Number(document.getElementById("fineTuneLr").value || 1e-5),
-          dropout: Number(document.getElementById("dropout").value || 0.3),
-        };
+      const payload = {
+        dataset: ds,
+        epochs: Number(document.getElementById("epochs").value || 20),
+        batch_size: Number(document.getElementById("batchSize").value || 16),
+        img_size: Number(document.getElementById("imgSize").value || 224),
+        warmup_epochs: Number(document.getElementById("warmupEpochs").value || 2),
+        lr: Number(document.getElementById("lr").value || 1e-4),
+        fine_tune_lr: Number(document.getElementById("fineTuneLr").value || 1e-5),
+        dropout: Number(document.getElementById("dropout").value || 0.3),
+      };
 
-        // OPTIONAL: kalau kamu nanti tambahin <input id="limit"> baru akan kepake
-        const limitEl = document.getElementById("limit");
-        if (limitEl && Number(limitEl.value) > 0) payload.limit = Number(limitEl.value);
+      // OPTIONAL: kalau kamu nanti tambahin <input id="limit"> baru akan kepake
+      const limitEl = document.getElementById("limit");
+      if (limitEl && Number(limitEl.value) > 0) payload.limit = Number(limitEl.value);
 
-        if (trainMode.value === "single") {
-          payload.model = modelName.value;
-        }
-
-        setStatus(`starting training (${ds})...`);
-        addLog(`▶️ Training request: dataset=${ds}, mode=${trainMode.value}${trainMode.value === "single" ? ", model=" + modelName.value : ""}`);
-
-        const resp = await fetch("/start_training", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-
-        if (!resp.ok) {
-          const txt = await resp.text().catch(() => "");
-          throw new Error(`POST /start_training failed (${resp.status}). ${txt}`);
-        }
-
-        const out = await resp.json();
-
-        if (out.status === "ok") {
-          setStatus(`running (${ds})`);
-          addLog(`✅ ${out.message || "Training started."}`);
-          if (out.processed_dir) addLog(`📁 processed_dir used: ${out.processed_dir}`);
-        } else {
-          setStatus("error");
-          addLog(`❌ ${out.message || "Unknown error"}`);
-        }
-      } catch (err) {
-        setStatus("error");
-        addLog("❌ " + err.message);
+      if (trainMode.value === "single") {
+        payload.model = modelName.value;
       }
-    });
 
-    // --- Socket listeners (optional) ---
-    if (socket) {
-      const logEvents = ["train_log", "training_log", "log", "message"];
-      const errEvents = ["train_error", "training_error", "error"];
-      const doneEvents = ["train_done", "training_done", "done"];
+      setStatus(`starting training (${ds})...`);
+      addLog(`▶️ Training request: dataset=${ds}, mode=${trainMode.value}${trainMode.value === "single" ? ", model=" + modelName.value : ""}`);
 
-      logEvents.forEach(ev => socket.on(ev, (data) => {
-        const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : JSON.stringify(data);
-        addLog(msg);
-      }));
+      const resp = await fetch("/start_training", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
 
-      errEvents.forEach(ev => socket.on(ev, (data) => {
-        const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : JSON.stringify(data);
-        addLog("❌ " + msg);
+      if (!resp.ok) {
+        const txt = await resp.text().catch(() => "");
+        throw new Error(`POST /start_training failed (${resp.status}). ${txt}`);
+      }
+
+      const out = await resp.json();
+
+      if (out.status === "ok") {
+        setStatus(`running (${ds})`);
+        addLog(`✅ ${out.message || "Training started."}`);
+        if (out.processed_dir) addLog(`📁 processed_dir used: ${out.processed_dir}`);
+      } else {
         setStatus("error");
-      }));
-
-      doneEvents.forEach(ev => socket.on(ev, (data) => {
-        const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : JSON.stringify(data);
-        addLog("✅ " + msg);
-        setStatus("done");
-      }));
+        addLog(`❌ ${out.message || "Unknown error"}`);
+      }
+    } catch (err) {
+      setStatus("error");
+      addLog("❌ " + err.message);
     }
+  });
 
-    // init
-    loadDatasets();
-  </script>
+  // --- Socket listeners (optional) ---
+  if (socket) {
+    const logEvents = ["train_log", "training_log", "log", "message"];
+    const errEvents = ["train_error", "training_error", "error"];
+    const doneEvents = ["train_done", "training_done", "done"];
 
-</body>
+    logEvents.forEach(ev => socket.on(ev, (data) => {
+      const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : JSON.stringify(data);
+      addLog(msg);
+    }));
 
-</html>
+    errEvents.forEach(ev => socket.on(ev, (data) => {
+      const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : JSON.stringify(data);
+      addLog("❌ " + msg);
+      setStatus("error");
+    }));
+
+    doneEvents.forEach(ev => socket.on(ev, (data) => {
+      const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : JSON.stringify(data);
+      addLog("✅ " + msg);
+      setStatus("done");
+    }));
+  }
+
+  // init
+  loadDatasets();
+</script>
+{% endblock %}

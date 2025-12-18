@@ -5,7 +5,7 @@
 <h3>Exploratory Data Analysis (EDA)</h3>
 
 <button id="startEdaBtn" class="btn btn-primary mt-2">
-  ▶ Start EDA (APTOS + DRTiD)
+  Start EDA (APTOS + DRTiD)
 </button>
 
 <div class="progress mt-3">
@@ -19,7 +19,7 @@
     <div class="card shadow-sm">
       <div class="card-body">
         <h5 class="fw-bold mb-3">APTOS</h5>
-        <div id="aptosBlock">Click “Start EDA”.</div>
+        <div id="aptosBlock">Click "Start EDA".</div>
       </div>
     </div>
   </div>
@@ -28,7 +28,7 @@
     <div class="card shadow-sm">
       <div class="card-body">
         <h5 class="fw-bold mb-3">DRTiD</h5>
-        <div id="drtidBlock">Click “Start EDA”.</div>
+        <div id="drtidBlock">Click "Start EDA".</div>
       </div>
     </div>
   </div>
@@ -37,106 +37,145 @@
 
 {% block scripts %}
 <script>
-  const logEl = document.getElementById("edaLog");
-  const bar = document.getElementById("edaProgress");
+  document.addEventListener("DOMContentLoaded", () => {
+    const btn = document.getElementById("startEdaBtn");
+    const logEl = document.getElementById("edaLog");
+    const bar = document.getElementById("edaProgress");
 
-  function appendLog(msg) {
-    logEl.textContent += msg + "\n";
-    logEl.scrollTop = logEl.scrollHeight;
-  }
-
-  function setProgress(p) {
-    const pct = Math.max(0, Math.min(100, Number(p) || 0));
-    bar.style.width = pct + "%";
-    bar.textContent = pct + "%";
-  }
-
-  function renderDataset(res, title) {
-    if (!res || res.status !== "ok") {
-      return `<div class="text-danger">❌ ${title}: ${res ? (res.message || "EDA failed") : "No data"}</div>`;
+    function appendLog(msg) {
+      logEl.textContent += msg + "\n";
+      logEl.scrollTop = logEl.scrollHeight;
     }
 
-    let html = "";
+    function setProgress(p) {
+      const pct = Math.max(0, Math.min(100, Number(p) || 0));
+      bar.style.width = pct + "%";
+      bar.textContent = pct + "%";
+    }
 
-    // Chart (backend returns chart_b64)
-    if (res.chart_b64) {
-      html += `
+    function fmtNum(x) {
+      if (x === null || x === undefined) return "-";
+      if (typeof x === "number" && !isFinite(x)) return "inf";
+      return x;
+    }
+
+    function fmtPct(x) {
+      if (x === null || x === undefined) return "-";
+      const v = Number(x);
+      if (!isFinite(v)) return "inf";
+      return (v * 100).toFixed(2) + "%";
+    }
+
+    function renderDataset(res, title) {
+      if (!res || res.status !== "ok") {
+        const msg = res ? (res.message || "EDA failed") : "No data";
+        return `<div class="text-danger">[ERR] ${title}: ${msg}</div>`;
+      }
+
+      let html = "";
+
+      // Chart
+      if (res.chart_b64) {
+        html += `
         <div class="mb-3">
           <img src="data:image/png;base64,${res.chart_b64}" class="img-fluid" />
         </div>
       `;
-    } else {
-      html += `<div class="text-muted mb-3">No chart available.</div>`;
-    }
+      } else {
+        html += `<div class="text-muted mb-3">No chart available.</div>`;
+      }
 
-    html += `
+      // Summary stats
+      const mba = (res.majority_baseline_accuracy === null || res.majority_baseline_accuracy === undefined)
+        ? "-"
+        : (Number(res.majority_baseline_accuracy) * 100).toFixed(2) + "%";
+
+      html += `
       <ul class="mb-3">
-        <li><b>Rows (train.csv):</b> ${res.num_rows ?? "None"}</li>
+        <li><b>Rows (train.csv):</b> ${fmtNum(res.num_rows)}</li>
+        <li><b>Valid labeled rows:</b> ${fmtNum(res.num_valid_rows)}</li>
+        <li><b>Missing labels:</b> ${fmtNum(res.missing_labels)}</li>
+        <li><b>Invalid labels:</b> ${fmtNum(res.invalid_labels)}</li>
+        <li><b>Duplicate IDs:</b> ${fmtNum(res.duplicate_ids)}</li>
+        <li><b>Majority baseline accuracy:</b> ${mba}</li>
+        <li><b>Imbalance ratio (max/min, non-zero):</b> ${fmtNum(res.imbalance_ratio)}</li>
       </ul>
     `;
 
-    // Label counts
-    if (res.label_counts) {
-      const items = Object.entries(res.label_counts)
-        .sort((a, b) => Number(a[0]) - Number(b[0]))
-        .map(([k, v]) => `<li>Class ${k}: ${v}</li>`)
-        .join("");
-      html += `
-        <div class="mb-2"><b>Label counts:</b></div>
-        <ul class="mb-3">${items}</ul>
-      `;
-    }
+      // Label distribution table
+      const counts = res.label_counts || {};
+      const perc = res.label_percent || {};
 
-    // Samples (image_b64)
-    if (Array.isArray(res.samples) && res.samples.length > 0) {
-      const thumbs = res.samples.map(s => `
-        <div style="display:inline-block; margin:6px; text-align:center;">
-          <img
-            src="data:image/png;base64,${s.image_b64}"
-            style="width:120px; height:120px; object-fit:cover; border-radius:10px; border:1px solid #e5e7eb;"
-          />
-          <div class="text-muted" style="font-size:12px;">Class ${s.label}</div>
-        </div>
+      const keys = Object.keys(counts).sort((a, b) => Number(a) - Number(b));
+      if (keys.length > 0) {
+        const rows = keys.map(k => `
+        <tr>
+          <td>${k}</td>
+          <td>${fmtNum(counts[k])}</td>
+          <td>${fmtPct(perc[k])}</td>
+        </tr>
       `).join("");
-      html += `<div><b>Random samples:</b></div><div>${thumbs}</div>`;
-    } else {
-      html += `<div class="text-muted">No sample images returned.</div>`;
+
+        html += `
+        <div class="mb-2"><b>Label distribution:</b></div>
+        <div class="table-responsive">
+          <table class="table table-sm table-bordered">
+            <thead>
+              <tr>
+                <th>Class</th>
+                <th>Count</th>
+                <th>Percent (of valid)</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows}
+            </tbody>
+          </table>
+        </div>
+      `;
+      } else {
+        html += `<div class="text-muted">No label counts available.</div>`;
+      }
+
+      return html;
     }
 
-    return html;
-  }
+    async function fetchEda(dataset) {
+      const resp = await fetch("/api/eda/summary", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dataset })
+      });
+      return await resp.json();
+    }
 
-  async function fetchEda(dataset) {
-    const resp = await fetch("/api/eda/summary", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dataset })
-    });
-    return await resp.json();
-  }
-
-  document.getElementById("startEdaBtn").onclick = async () => {
-    setProgress(0);
-    logEl.textContent = "";
-    appendLog("▶ Starting EDA for APTOS + DRTiD...");
-
-    try {
-      setProgress(10);
-      const aptos = await fetchEda("aptos2019");
-      appendLog("✅ APTOS EDA fetched.");
-      document.getElementById("aptosBlock").innerHTML = renderDataset(aptos, "APTOS");
-
-      setProgress(60);
-      const drtid = await fetchEda("drtid");
-      appendLog("✅ DRTiD EDA fetched.");
-      document.getElementById("drtidBlock").innerHTML = renderDataset(drtid, "DRTiD");
-
-      setProgress(100);
-      appendLog("✅ EDA results rendered.");
-    } catch (e) {
-      appendLog("❌ EDA failed: " + e);
+    btn.addEventListener("click", async () => {
       setProgress(0);
-    }
-  };
+      logEl.textContent = "";
+      appendLog(">> Starting EDA for APTOS + DRTiD...");
+
+      btn.disabled = true;
+
+      try {
+        setProgress(10);
+        const aptos = await fetchEda("aptos2019");
+        appendLog("[OK] APTOS EDA fetched.");
+        document.getElementById("aptosBlock").innerHTML = renderDataset(aptos, "APTOS");
+
+        setProgress(60);
+        const drtid = await fetchEda("drtid");
+        appendLog("[OK] DRTiD EDA fetched.");
+        document.getElementById("drtidBlock").innerHTML = renderDataset(drtid, "DRTiD");
+
+        setProgress(100);
+        appendLog("[OK] EDA results rendered.");
+      } catch (e) {
+        appendLog("[ERR] EDA failed: " + e);
+        setProgress(0);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
 </script>
 {% endblock %}

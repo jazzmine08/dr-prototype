@@ -3,7 +3,11 @@
 
 {% block content %}
 <div class="text-center p-5 bg-light rounded shadow-sm">
-    <i class="bi bi-eye-fill display-4 text-primary"></i>
+
+    <!-- ✅ Hero Image -->
+    <img src="{{ url_for('static', filename='img/budiluhur.jpg') }}" class="img-fluid rounded shadow-sm mb-4"
+        style="max-height: 160px; object-fit: cover;">
+
 
     <h2 class="mt-3">
         Improving Diabetic Retinopathy Grading Accuracy<br>

@@ -1,505 +1,371 @@
-<!doctype html>
-<html lang="en">
+{% extends "base.html" %}
+{% block title %}Ensemble — DR Ensemble{% endblock %}
 
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>DR Ensemble - Ensemble</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 0;
-            background: #fafafa;
+{% block content %}
+<h3 class="mb-2">Ensemble</h3>
+<p class="text-muted mt-0">
+    Pilih dataset + pilih 3 run (DenseNet121, InceptionResNetV2, EfficientNetV2B0).
+</p>
+
+<style>
+    /* page-specific styles only (safe with base.html) */
+    .rowx {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+    }
+
+    .gridx {
+        display: grid;
+        grid-template-columns: 440px 1fr;
+        gap: 14px;
+    }
+
+    @media (max-width: 1000px) {
+        .gridx {
+            grid-template-columns: 1fr;
         }
+    }
 
-        header {
-            background: #111827;
-            color: white;
-            padding: 14px 20px;
-        }
+    .log {
+        height: 260px;
+        overflow: auto;
+        background: #0b0f14;
+        color: #d8e1ff;
+        padding: 12px;
+        border-radius: 12px;
+        font-family: Consolas, monospace;
+        font-size: 13px;
+    }
 
-        .brand {
-            font-size: 18px;
-            font-weight: 700;
-            margin-right: 18px;
-        }
+    .small {
+        font-size: 12px;
+    }
 
-        nav {
-            display: flex;
-            gap: 12px;
-            align-items: center;
-            flex-wrap: wrap;
-        }
+    img.preview {
+        width: 100%;
+        border-radius: 12px;
+        border: 1px solid #e5e7eb;
+        background: #fff;
+    }
 
-        nav a {
-            color: #e5e7eb;
-            text-decoration: none;
-            padding: 8px 10px;
-            border-radius: 10px;
-            font-weight: 600;
-            font-size: 14px;
-        }
+    pre.report {
+        white-space: pre-wrap;
+        background: #0b0f14;
+        color: #d8e1ff;
+        padding: 12px;
+        border-radius: 12px;
+        overflow: auto;
+        font-family: Consolas, monospace;
+        font-size: 13px;
+    }
+</style>
 
-        nav a:hover {
-            background: rgba(255, 255, 255, 0.08);
-        }
+<div class="gridx">
+    <!-- LEFT: controls -->
+    <div class="card shadow-sm p-3">
+        <label class="fw-bold">Dataset</label>
+        <select id="datasetSelect" class="form-select"></select>
 
-        nav a.active {
-            background: rgba(255, 255, 255, 0.16);
-            color: #fff;
-        }
-
-        main {
-            padding: 22px;
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-
-        .row {
-            display: flex;
-            gap: 12px;
-            align-items: center;
-            flex-wrap: wrap;
-        }
-
-        .grid {
-            display: grid;
-            grid-template-columns: 440px 1fr;
-            gap: 14px;
-        }
-
-        @media (max-width: 1000px) {
-            .grid {
-                grid-template-columns: 1fr;
-            }
-        }
-
-        .card {
-            background: white;
-            border: 1px solid #e5e7eb;
-            border-radius: 14px;
-            padding: 16px;
-            margin-top: 16px;
-            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
-        }
-
-        .muted {
-            color: #6b7280;
-        }
-
-        .pill {
-            display: inline-block;
-            padding: 4px 10px;
-            border-radius: 999px;
-            background: #eef2ff;
-            color: #3730a3;
-            font-weight: 800;
-            font-size: 12px;
-        }
-
-        select,
-        input {
-            padding: 10px 12px;
-            border-radius: 12px;
-            border: 1px solid #d1d5db;
-            background: white;
-            width: 100%;
-            box-sizing: border-box;
-        }
-
-        label {
-            font-weight: 800;
-            font-size: 13px;
-        }
-
-        button {
-            padding: 10px 14px;
-            border: 0;
-            border-radius: 12px;
-            cursor: pointer;
-            font-weight: 800;
-        }
-
-        button.primary {
-            background: #2563eb;
-            color: white;
-        }
-
-        button.secondary {
-            background: #e5e7eb;
-            color: #111827;
-        }
-
-        .log {
-            height: 260px;
-            overflow: auto;
-            background: #0b0f14;
-            color: #d8e1ff;
-            padding: 12px;
-            border-radius: 12px;
-            font-family: Consolas, monospace;
-            font-size: 13px;
-        }
-
-        img {
-            width: 100%;
-            border-radius: 12px;
-            border: 1px solid #e5e7eb;
-            background: #fff;
-        }
-
-        pre {
-            white-space: pre-wrap;
-            background: #0b0f14;
-            color: #d8e1ff;
-            padding: 12px;
-            border-radius: 12px;
-            overflow: auto;
-            font-family: Consolas, monospace;
-            font-size: 13px;
-        }
-
-        .small {
-            font-size: 12px;
-        }
-    </style>
-
-    <!-- Socket.IO (optional) -->
-    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-</head>
-
-<body>
-    <header>
-        <div class="row" style="justify-content: space-between;">
-            <div class="row">
-                <div class="brand">DR Ensemble</div>
-                <nav>
-                    <a href="/">Home</a>
-                    <a href="/preprocessing">Preprocessing</a>
-                    <a href="/eda">EDA</a>
-                    <a href="/training">Training</a>
-                    <a class="active" href="/ensemble">Ensemble</a>
-                    <a href="/results">Results</a>
-                </nav>
-            </div>
-            <div class="pill">Soft Voting (weighted)</div>
-        </div>
-    </header>
-
-    <main>
-        <h2 style="margin:0;">Ensemble</h2>
-        <p class="muted" style="margin-top:6px;">
-            Pilih dataset + pilih 3 run (DenseNet121, InceptionResNetV2, EfficientNetV2B0).
-            <br />
-            <span class="small">
-                Tips: Weighting <b>by_qwk</b> biasanya paling aman buat naikin average performance.
-            </span>
-        </p>
-
-        <div class="grid">
-            <div class="card">
-                <label>Dataset</label>
-                <select id="datasetSelect"></select>
-
-                <div style="margin-top:12px;">
-                    <label>processed_dir (boleh edit kalau path lu beda)</label>
-                    <input id="processedDir"
-                        placeholder="G:\My Drive\dr_prototype\processed\aptos2019\processed_final\train" />
-                    <div class="muted small" style="margin-top:6px;">
-                        Default: <code>G:\My Drive\dr_prototype\processed\{dataset}\processed_final\train</code>
-                    </div>
-                </div>
-
-                <div style="margin-top:12px;">
-                    <label>Run 1 (DenseNet121)</label>
-                    <select id="run1"></select>
-                </div>
-
-                <div style="margin-top:12px;">
-                    <label>Run 2 (InceptionResNetV2)</label>
-                    <select id="run2"></select>
-                </div>
-
-                <div style="margin-top:12px;">
-                    <label>Run 3 (EfficientNetV2B0)</label>
-                    <select id="run3"></select>
-                </div>
-
-                <div style="margin-top:12px;">
-                    <label>Weighting Mode</label>
-                    <select id="weightingMode">
-                        <option value="by_qwk" selected>Auto (by QWK) - recommended</option>
-                        <option value="by_valacc">Auto (by best val accuracy)</option>
-                        <option value="equal">Equal weights</option>
-                        <option value="manual">Manual (isi w1,w2,w3)</option>
-                    </select>
-                </div>
-
-                <div class="grid" style="margin-top:12px; grid-template-columns: 1fr 1fr 1fr;">
-                    <div>
-                        <label>w1</label>
-                        <input id="w1" type="number" step="0.01" placeholder="0.33" />
-                    </div>
-                    <div>
-                        <label>w2</label>
-                        <input id="w2" type="number" step="0.01" placeholder="0.33" />
-                    </div>
-                    <div>
-                        <label>w3</label>
-                        <input id="w3" type="number" step="0.01" placeholder="0.34" />
-                    </div>
-                </div>
-
-                <div class="grid" style="margin-top:12px; grid-template-columns: 1fr 1fr;">
-                    <div>
-                        <label>Batch Size</label>
-                        <input id="batchSize" type="number" min="1" value="16" />
-                    </div>
-                    <div>
-                        <label>Method</label>
-                        <select id="methodSelect">
-                            <option value="softvote" selected>softvote</option>
-                            <option value="hardvote">hardvote</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="row" style="margin-top:12px;">
-                    <button class="secondary" id="btnRefreshRuns">Refresh Runs</button>
-                    <button class="primary" id="btnStartEnsemble">Run Ensemble</button>
-                </div>
-
-                <div style="margin-top:12px;">
-                    <div class="muted"><b>Status:</b> <span id="statusText">idle</span></div>
-                </div>
-
-                <div style="margin-top:12px;">
-                    <div class="muted" style="font-weight:800; margin-bottom:6px;">Logs</div>
-                    <div id="logBox" class="log"></div>
-                </div>
-            </div>
-
-            <div class="card">
-                <div style="font-weight:900; font-size:16px;">Latest Ensemble Result</div>
-                <div class="muted" id="ensDir" style="margin-top:6px;"></div>
-
-                <div style="margin-top:14px;">
-                    <div class="muted" style="font-weight:800; margin-bottom:6px;">Confusion Matrix</div>
-                    <img id="imgCM" alt="Ensemble confusion matrix" />
-                </div>
-
-                <div style="margin-top:14px;">
-                    <div class="muted" style="font-weight:800; margin-bottom:6px;">Classification Report</div>
-                    <pre id="reportBox">(no report yet)</pre>
-                </div>
+        <div class="mt-3">
+            <label class="fw-bold">processed_dir</label>
+            <input id="processedDir" class="form-control"
+                placeholder="G:\My Drive\dr_prototype\processed\aptos2019\processed_final\train" />
+            <div class="text-muted small mt-2">
+                Default: <code>G:\My Drive\dr_prototype\processed\{dataset}\processed_final\train</code>
             </div>
         </div>
-    </main>
 
-    <script>
-        const logBox = document.getElementById("logBox");
-        const statusText = document.getElementById("statusText");
-        const datasetSelect = document.getElementById("datasetSelect");
-        const processedDirEl = document.getElementById("processedDir");
+        <div class="mt-3">
+            <label class="fw-bold">Run 1 (DenseNet121)</label>
+            <select id="run1" class="form-select"></select>
+        </div>
 
-        const run1 = document.getElementById("run1");
-        const run2 = document.getElementById("run2");
-        const run3 = document.getElementById("run3");
+        <div class="mt-3">
+            <label class="fw-bold">Run 2 (InceptionResNetV2)</label>
+            <select id="run2" class="form-select"></select>
+        </div>
 
-        const btnRefreshRuns = document.getElementById("btnRefreshRuns");
-        const btnStartEnsemble = document.getElementById("btnStartEnsemble");
+        <div class="mt-3">
+            <label class="fw-bold">Run 3 (EfficientNetV2B0)</label>
+            <select id="run3" class="form-select"></select>
+        </div>
 
-        const ensDir = document.getElementById("ensDir");
-        const imgCM = document.getElementById("imgCM");
-        const reportBox = document.getElementById("reportBox");
+        <div class="mt-3">
+            <label class="fw-bold">Weighting Mode</label>
+            <select id="weightingMode" class="form-select">
+                <option value="by_qwk" selected>Auto (by QWK) - recommended</option>
+                <option value="by_valacc">Auto (by best val accuracy)</option>
+                <option value="equal">Equal weights</option>
+                <option value="manual">Manual (isi w1,w2,w3)</option>
+            </select>
+        </div>
 
-        const batchSizeEl = document.getElementById("batchSize");
-        const weightingModeEl = document.getElementById("weightingMode");
-        const methodSelect = document.getElementById("methodSelect");
-        const w1El = document.getElementById("w1");
-        const w2El = document.getElementById("w2");
-        const w3El = document.getElementById("w3");
+        <div class="mt-3" style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
+            <div>
+                <label class="fw-bold">w1</label>
+                <input id="w1" type="number" step="0.01" placeholder="0.33" class="form-control" />
+            </div>
+            <div>
+                <label class="fw-bold">w2</label>
+                <input id="w2" type="number" step="0.01" placeholder="0.33" class="form-control" />
+            </div>
+            <div>
+                <label class="fw-bold">w3</label>
+                <input id="w3" type="number" step="0.01" placeholder="0.34" class="form-control" />
+            </div>
+        </div>
 
-        const socket = (window.io) ? io() : null;
+        <div class="mt-3" style="display:grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+            <div>
+                <label class="fw-bold">Batch Size</label>
+                <input id="batchSize" type="number" min="1" value="16" class="form-control" />
+            </div>
+            <div>
+                <label class="fw-bold">Method</label>
+                <select id="methodSelect" class="form-select">
+                    <option value="softvote" selected>softvote</option>
+                    <option value="hardvote">hardvote</option>
+                </select>
+            </div>
+        </div>
 
-        function addLog(msg) {
-            const ts = new Date().toLocaleTimeString();
-            logBox.innerHTML += `[${ts}] ${msg}<br/>`;
-            logBox.scrollTop = logBox.scrollHeight;
-        }
+        <div class="rowx mt-3">
+            <button class="btn btn-outline-secondary" id="btnRefreshRuns">Refresh Runs</button>
+            <button class="btn btn-primary" id="btnStartEnsemble">Run Ensemble</button>
+        </div>
 
-        function getProcessedDir(ds) {
-            // default path you used in trainer logs
-            const base = `G:\\My Drive\\dr_prototype\\processed\\${ds}\\processed_final\\train`;
-            const custom = (processedDirEl.value || "").trim();
-            return custom ? custom : base;
-        }
+        <div class="mt-3 text-muted"><b>Status:</b> <span id="statusText">idle</span></div>
 
-        async function loadDatasets() {
-            const res = await fetch("/datasets");
-            const data = await res.json();
-            datasetSelect.innerHTML = "";
-            (data.datasets || []).forEach(ds => {
-                const opt = document.createElement("option");
-                opt.value = ds;
-                opt.textContent = (ds === "aptos2019") ? "APTOS 2019" : (ds === "drtid") ? "DRTiD" : ds;
-                datasetSelect.appendChild(opt);
-            });
-            if ([...datasetSelect.options].some(o => o.value === "aptos2019")) datasetSelect.value = "aptos2019";
-            addLog(`✅ Loaded datasets: ${(data.datasets || []).join(", ") || "(none)"}`);
-            // update default processed dir display
-            processedDirEl.value = "";
-        }
+        <div class="mt-3">
+            <div class="text-muted fw-bold mb-2">Logs</div>
+            <div id="logBox" class="log"></div>
+        </div>
+    </div>
 
-        function setOptions(selectEl, items) {
-            selectEl.innerHTML = "";
-            items.forEach(it => {
-                const opt = document.createElement("option");
-                opt.value = it.run_id;
-                opt.textContent = it.label;
-                selectEl.appendChild(opt);
-            });
-        }
+    <!-- RIGHT: outputs -->
+    <div class="card shadow-sm p-3">
+        <div class="fw-bold" style="font-size:16px;">Latest Ensemble Result</div>
+        <div class="text-muted" id="ensDir" style="margin-top:6px;"></div>
 
-        function pickPreferred(selectEl, keyword) {
-            const opts = [...selectEl.options];
-            const found = opts.find(o => (o.value || "").includes(keyword));
-            if (found) selectEl.value = found.value;
-        }
+        <div class="mt-3">
+            <div class="text-muted fw-bold mb-2">Confusion Matrix</div>
+            <img id="imgCM" class="preview" alt="Ensemble confusion matrix" />
+        </div>
 
-        async function refreshRuns() {
-            const ds = datasetSelect.value || "aptos2019";
-            addLog(`🔄 Loading runs for ${ds}...`);
+        <div class="mt-3">
+            <div class="text-muted fw-bold mb-2">Classification Report</div>
+            <pre id="reportBox" class="report">(no report yet)</pre>
+        </div>
+    </div>
+</div>
+{% endblock %}
 
-            const res = await fetch(`/api/results/list_detailed?dataset=${encodeURIComponent(ds)}`);
-            const data = await res.json();
+{% block scripts %}
+<!-- Socket.IO (optional) -->
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 
-            const runs = (data.runs || []).map(r => ({
-                run_id: r.run_id,
-                label: `${r.run_id}  |  ${r.model || r.model_name || ""}  |  ${r.created_at || ""}`
-            }));
+<script>
+    const logBox = document.getElementById("logBox");
+    const statusText = document.getElementById("statusText");
+    const datasetSelect = document.getElementById("datasetSelect");
+    const processedDirEl = document.getElementById("processedDir");
 
-            if (runs.length === 0) {
-                addLog("⚠️ No runs found. Train models first.");
-                setOptions(run1, []);
-                setOptions(run2, []);
-                setOptions(run3, []);
-                return;
-            }
+    const run1 = document.getElementById("run1");
+    const run2 = document.getElementById("run2");
+    const run3 = document.getElementById("run3");
 
-            setOptions(run1, runs);
-            setOptions(run2, runs);
-            setOptions(run3, runs);
+    const btnRefreshRuns = document.getElementById("btnRefreshRuns");
+    const btnStartEnsemble = document.getElementById("btnStartEnsemble");
 
-            // auto pick latest matching backbones
-            pickPreferred(run1, "DenseNet121");
-            pickPreferred(run2, "InceptionResNetV2");
-            pickPreferred(run3, "EfficientNetV2B0");
+    const ensDir = document.getElementById("ensDir");
+    const imgCM = document.getElementById("imgCM");
+    const reportBox = document.getElementById("reportBox");
 
-            addLog(`✅ Loaded ${runs.length} run(s) for ${ds}.`);
-        }
+    const batchSizeEl = document.getElementById("batchSize");
+    const weightingModeEl = document.getElementById("weightingMode");
+    const methodSelect = document.getElementById("methodSelect");
+    const w1El = document.getElementById("w1");
+    const w2El = document.getElementById("w2");
+    const w3El = document.getElementById("w3");
 
-        btnRefreshRuns.addEventListener("click", refreshRuns);
-        datasetSelect.addEventListener("change", () => {
-            processedDirEl.value = ""; // reset custom path on dataset change
-            refreshRuns();
+    const socket = (window.io) ? io() : null;
+
+    function addLog(msg) {
+        const ts = new Date().toLocaleTimeString();
+        logBox.innerHTML += `[${ts}] ${msg}<br/>`;
+        logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function getProcessedDir(ds) {
+        const base = `G:\\My Drive\\dr_prototype\\processed\\${ds}\\processed_final\\train`;
+        const custom = (processedDirEl.value || "").trim();
+        return custom ? custom : base;
+    }
+
+    async function loadDatasets() {
+        const res = await fetch("/datasets");
+        const data = await res.json();
+        datasetSelect.innerHTML = "";
+        (data.datasets || []).forEach(ds => {
+            const opt = document.createElement("option");
+            opt.value = ds;
+            opt.textContent = (ds === "aptos2019") ? "APTOS 2019" : (ds === "drtid") ? "DRTiD" : ds;
+            datasetSelect.appendChild(opt);
         });
+        if ([...datasetSelect.options].some(o => o.value === "aptos2019")) datasetSelect.value = "aptos2019";
+        addLog(`✅ Loaded datasets: ${(data.datasets || []).join(", ") || "(none)"}`);
+        processedDirEl.value = "";
+    }
 
-        weightingModeEl.addEventListener("change", () => {
-            const isManual = (weightingModeEl.value === "manual");
-            w1El.disabled = !isManual;
-            w2El.disabled = !isManual;
-            w3El.disabled = !isManual;
-            if (!isManual) {
-                w1El.value = "";
-                w2El.value = "";
-                w3El.value = "";
-            }
+    function setOptions(selectEl, items) {
+        selectEl.innerHTML = "";
+        items.forEach(it => {
+            const opt = document.createElement("option");
+            opt.value = it.run_id;
+            opt.textContent = it.label;
+            selectEl.appendChild(opt);
         });
-        weightingModeEl.dispatchEvent(new Event("change"));
+    }
 
-        btnStartEnsemble.addEventListener("click", async () => {
-            const ds = datasetSelect.value || "aptos2019";
-            if (!run1.value || !run2.value || !run3.value) {
-                addLog("❌ Please select 3 runs (DenseNet121, InceptionResNetV2, EfficientNetV2B0).");
-                return;
-            }
+    function pickPreferred(selectEl, keyword) {
+        const opts = [...selectEl.options];
+        const found = opts.find(o => (o.value || "").includes(keyword));
+        if (found) selectEl.value = found.value;
+    }
 
-            const payload = {
-                dataset: ds,
-                processed_dir: getProcessedDir(ds),
-                run_ids: [run1.value, run2.value, run3.value],
-                method: methodSelect.value || "softvote",
-                batch_size: Number(batchSizeEl.value || 16),
-                cache_dataset: false
-            };
+    async function refreshRuns() {
+        const ds = datasetSelect.value || "aptos2019";
+        addLog(`🔄 Loading runs for ${ds}...`);
 
-            // weighting mode
-            const wm = weightingModeEl.value || "by_qwk";
-            if (wm === "manual") {
-                const w1 = Number(w1El.value || 0);
-                const w2 = Number(w2El.value || 0);
-                const w3 = Number(w3El.value || 0);
-                payload.weights = [w1, w2, w3];
-            } else {
-                payload.weighting = wm; // by_qwk / by_valacc / equal
-            }
+        const res = await fetch(`/api/results/list_detailed?dataset=${encodeURIComponent(ds)}`);
+        const data = await res.json();
 
-            statusText.textContent = "running...";
-            addLog(`▶️ Start ensemble for ${ds}`);
-            addLog(`📁 processed_dir = ${payload.processed_dir}`);
-            addLog(`🧠 run_ids = ${payload.run_ids.join(", ")}`);
-            addLog(`⚙️ method=${payload.method}, weighting=${payload.weighting || "manual"}`);
+        const runs = (data.runs || []).map(r => ({
+            run_id: r.run_id,
+            label: `${r.run_id}  |  ${(r.model || r.model_name || "")}  |  ${(r.created_at || "")}`
+        }));
 
-            const resp = await fetch("/start_ensemble", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload)
-            });
-            const out = await resp.json().catch(() => ({}));
-            addLog(out.message || "Ensemble started");
-        });
+        if (runs.length === 0) {
+            addLog("⚠️ No runs found. Train models first.");
+            setOptions(run1, []);
+            setOptions(run2, []);
+            setOptions(run3, []);
+            return;
+        }
 
-        if (socket) {
-            socket.on("ensemble_log", (d) => addLog(d.message || JSON.stringify(d)));
-            socket.on("ensemble_error", (d) => {
-                statusText.textContent = "error";
-                addLog("❌ " + (d.message || JSON.stringify(d)));
-            });
+        setOptions(run1, runs);
+        setOptions(run2, runs);
+        setOptions(run3, runs);
 
-            socket.on("ensemble_done", async (d) => {
-                statusText.textContent = "done";
-                addLog("✅ Ensemble done");
+        pickPreferred(run1, "DenseNet121");
+        pickPreferred(run2, "InceptionResNetV2");
+        pickPreferred(run3, "EfficientNetV2B0");
 
-                const summary = d.summary || {};
-                const runDir = d.run_dir || summary?.run_dir || "";
-                ensDir.textContent = runDir;
+        addLog(`✅ Loaded ${runs.length} run(s) for ${ds}.`);
+    }
 
-                // show saved artifacts via /api/ensemble/get
-                try {
-                    const ds = datasetSelect.value || "aptos2019";
-                    const runId = (runDir || "").split("\\").pop().split("/").pop();
-                    const detRes = await fetch(`/api/ensemble/get?dataset=${encodeURIComponent(ds)}&run_id=${encodeURIComponent(runId)}`);
-                    const det = await detRes.json();
-                    if (det.status === "ok") {
-                        if (det.images?.["confusion_matrix.png"]) imgCM.src = det.images["confusion_matrix.png"];
-                        reportBox.textContent = det.report || "(no report)";
-                    } else {
-                        reportBox.textContent = "(Saved to folder, but API could not load details.)";
-                    }
-                } catch (e) {
-                    reportBox.textContent = "(Saved to folder. Could not load via API.)";
-                }
-            });
+    btnRefreshRuns.addEventListener("click", refreshRuns);
+    datasetSelect.addEventListener("change", () => {
+        processedDirEl.value = "";
+        refreshRuns();
+    });
+
+    weightingModeEl.addEventListener("change", () => {
+        const isManual = (weightingModeEl.value === "manual");
+        w1El.disabled = !isManual;
+        w2El.disabled = !isManual;
+        w3El.disabled = !isManual;
+        if (!isManual) {
+            w1El.value = "";
+            w2El.value = "";
+            w3El.value = "";
+        }
+    });
+    weightingModeEl.dispatchEvent(new Event("change"));
+
+    btnStartEnsemble.addEventListener("click", async () => {
+        const ds = datasetSelect.value || "aptos2019";
+        if (!run1.value || !run2.value || !run3.value) {
+            addLog("❌ Please select 3 runs (DenseNet121, InceptionResNetV2, EfficientNetV2B0).");
+            return;
+        }
+
+        const payload = {
+            dataset: ds,
+            processed_dir: getProcessedDir(ds),
+            run_ids: [run1.value, run2.value, run3.value],
+            method: methodSelect.value || "softvote",
+            batch_size: Number(batchSizeEl.value || 16),
+            cache_dataset: false
+        };
+
+        const wm = weightingModeEl.value || "by_qwk";
+        if (wm === "manual") {
+            payload.weights = [
+                Number(w1El.value || 0),
+                Number(w2El.value || 0),
+                Number(w3El.value || 0)
+            ];
         } else {
-            addLog("⚠️ Socket.IO not loaded. Page still works, but realtime logs may not appear.");
+            payload.weighting = wm;
         }
 
-        (async function init() {
-            await loadDatasets();
-            await refreshRuns();
-        })();
-    </script>
-</body>
+        statusText.textContent = "running...";
+        addLog(`▶️ Start ensemble for ${ds}`);
+        addLog(`📁 processed_dir = ${payload.processed_dir}`);
+        addLog(`🧠 run_ids = ${payload.run_ids.join(", ")}`);
+        addLog(`⚙️ method=${payload.method}, weighting=${payload.weighting || "manual"}`);
 
-</html>
+        const resp = await fetch("/start_ensemble", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+
+        const out = await resp.json().catch(() => ({}));
+        addLog(out.message || "Ensemble started");
+    });
+
+    if (socket) {
+        socket.on("ensemble_log", (d) => addLog(d.message || JSON.stringify(d)));
+
+        socket.on("ensemble_error", (d) => {
+            statusText.textContent = "error";
+            addLog("❌ " + (d.message || JSON.stringify(d)));
+        });
+
+        socket.on("ensemble_done", async (d) => {
+            statusText.textContent = "done";
+            addLog("✅ Ensemble done");
+
+            const summary = d.summary || {};
+            const runDir = d.run_dir || summary?.run_dir || "";
+            ensDir.textContent = runDir;
+
+            try {
+                const ds = datasetSelect.value || "aptos2019";
+                const runId = (runDir || "").split("\\").pop().split("/").pop();
+                const detRes = await fetch(`/api/ensemble/get?dataset=${encodeURIComponent(ds)}&run_id=${encodeURIComponent(runId)}`);
+                const det = await detRes.json();
+                if (det.status === "ok") {
+                    if (det.images?.["confusion_matrix.png"]) imgCM.src = det.images["confusion_matrix.png"];
+                    reportBox.textContent = det.report || "(no report)";
+                } else {
+                    reportBox.textContent = "(Saved to folder, but API could not load details.)";
+                }
+            } catch (e) {
+                reportBox.textContent = "(Saved to folder. Could not load via API.)";
+            }
+        });
+    } else {
+        addLog("⚠️ Socket.IO not loaded. Page still works, but realtime logs may not appear.");
+    }
+
+    (async function init() {
+        await loadDatasets();
+        await refreshRuns();
+    })();
+</script>
+{% endblock %}

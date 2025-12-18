@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block title %}Predict{% endblock %}
+
+{% block content %}
+<h3>Prediction</h3>
+
+<div class="card shadow-sm p-3">
+    <div class="row g-2 align-items-center">
+        <div class="col-auto">
+            <input id="fileInput" type="file" accept="image/*" class="form-control" />
+        </div>
+
+        <div class="col-auto">
+            <select id="datasetSelect" class="form-select">
+                <option value="aptos2019" selected>APTOS 2019</option>
+                <option value="drtid">DRTiD</option>
+            </select>
+        </div>
+
+        <div class="col-auto">
+            <button id="btnPredict" class="btn btn-primary">Predict</button>
+        </div>
+    </div>
+
+    <div class="text-muted mt-2" style="font-size: 13px;">Upload Image</div>
+</div>
+
+<div class="row mt-3">
+    <div class="col-md-6">
+        <div class="card shadow-sm p-3">
+            <h5 class="fw-bold">Original</h5>
+            <img id="origImg" src=""
+                style="width:100%; max-height:380px; object-fit:contain; border:1px solid #e5e7eb; border-radius:10px;" />
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card shadow-sm p-3">
+            <h5 class="fw-bold">Processed</h5>
+            <img id="procImg" src=""
+                style="width:100%; max-height:380px; object-fit:contain; border:1px solid #e5e7eb; border-radius:10px;" />
+        </div>
+    </div>
+</div>
+
+<div class="card shadow-sm p-3 mt-3">
+    <h5 class="fw-bold">Predictions</h5>
+    <div id="resultBlock" class="text-muted">No prediction yet.</div>
+</div>
+
+<pre id="logBox" class="bg-dark text-light p-3 mt-3" style="height:180px; overflow:auto;"></pre>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const fileInput = document.getElementById("fileInput");
+    const datasetSelect = document.getElementById("datasetSelect");
+    const btnPredict = document.getElementById("btnPredict");
+    const origImg = document.getElementById("origImg");
+    const procImg = document.getElementById("procImg");
+    const resultBlock = document.getElementById("resultBlock");
+    const logBox = document.getElementById("logBox");
+
+    let currentObjectUrl = null;
+
+    function log(msg) {
+        logBox.textContent += msg + "\n";
+        logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function esc(s) {
+        return String(s ?? "").replace(/[&<>"']/g, (m) =>
+            ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[m])
+        );
+    }
+
+    function setProcessedPreview(b64) {
+        if (!b64) return;
+        procImg.src = b64.startsWith("data:") ? b64 : ("data:image/png;base64," + b64);
+    }
+
+    function renderResults(data) {
+        const baseModels = Array.isArray(data?.results) ? data.results
+            : (Array.isArray(data?.models) ? data.models : []);
+
+        if (data?.preprocessed_preview_b64) {
+            setProcessedPreview(data.preprocessed_preview_b64);
+        }
+
+        const rows = baseModels.map(m => {
+            if (!m || m.status !== "ok") {
+                return {
+                    model: m?.model || "Unknown",
+                    pred_label: m?.message ? `Error: ${m.message}` : "Error"
+                };
+            }
+            return {
+                model: m.model || "Model",
+                pred_label: m.pred_label || "-"
+            };
+        });
+
+        if (data?.ensemble) {
+            rows.push({
+                model: "Ensemble",
+                pred_label: data.ensemble.pred_label || "-"
+            });
+        }
+
+        if (!rows.length) {
+            resultBlock.innerHTML = `<div class="text-danger">No model results returned by server.</div>`;
+            return;
+        }
+
+        resultBlock.innerHTML = `
+      <div class="table-responsive">
+        <table class="table table-sm table-bordered align-middle">
+          <thead>
+            <tr>
+              <th style="width: 40%;">Model</th>
+              <th>Prediction</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr>
+                <td>${esc(r.model)}</td>
+                <td><b>${esc(r.pred_label)}</b></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+    }
+
+    fileInput.addEventListener("change", () => {
+        const f = fileInput.files?.[0];
+        if (!f) return;
+
+        // cleanup old preview url
+        if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
+        currentObjectUrl = URL.createObjectURL(f);
+
+        origImg.src = currentObjectUrl;
+        procImg.src = "";
+        resultBlock.textContent = "Ready. Click Predict.";
+        logBox.textContent = "";
+    });
+
+    btnPredict.addEventListener("click", async () => {
+        const f = fileInput.files?.[0];
+        if (!f) {
+            alert("Please upload an image first.");
+            return;
+        }
+
+        btnPredict.disabled = true;
+        resultBlock.textContent = "Predicting...";
+        logBox.textContent = "";
+        log("Starting prediction...");
+
+        const fd = new FormData();
+        fd.append("image", f);
+        fd.append("dataset", datasetSelect.value);
+
+        try {
+            const resp = await fetch("/api/predict", { method: "POST", body: fd });
+
+            const text = await resp.text();
+            let data;
+            try {
+                data = JSON.parse(text);
+            } catch (err) {
+                throw new Error(`Server did not return JSON (HTTP ${resp.status}). First 120 chars: ${text.slice(0, 120)}`);
+            }
+
+            if (!resp.ok) {
+                throw new Error(data?.message || `Request failed (HTTP ${resp.status})`);
+            }
+
+            log("Done.");
+            renderResults(data);
+
+        } catch (e) {
+            log("Failed: " + (e?.message || e));
+            resultBlock.innerHTML = `<div class="text-danger">Failed: ${esc(e?.message || e)}</div>`;
+        } finally {
+            btnPredict.disabled = false;
+        }
+    });
+</script>
+{% endblock %}
