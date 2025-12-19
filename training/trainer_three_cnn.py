@@ -7,7 +7,10 @@ import time
 import traceback
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Any, Optional
+
+import numpy as np
+from sklearn.utils.class_weight import compute_class_weight
 
 from tensorflow import keras
 from tensorflow.keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, EarlyStopping, CSVLogger
@@ -16,6 +19,9 @@ import training.training_cnn_v2 as tcnn
 from training.results_utils import make_run_dir, save_training_artifacts
 
 
+# =========================================================
+# Socket helpers
+# =========================================================
 def _emit(socketio, event: str, payload: dict):
     """Safe emit (won't crash if socketio is None)."""
     try:
@@ -27,7 +33,17 @@ def _emit(socketio, event: str, payload: dict):
         pass
 
 
+# =========================================================
+# Full results append (safe + creates folders)
+# =========================================================
 def _append_to_full_results(results_dir: str, record: dict):
+    """
+    Appends one record into:
+      <results_dir>/cnn/training_results_full.json
+
+    NOTE:
+    - results_dir passed in here is already something like: <project_root>/models/results
+    """
     os.makedirs(results_dir, exist_ok=True)
     full_path = os.path.join(results_dir, "cnn", "training_results_full.json")
     os.makedirs(os.path.dirname(full_path), exist_ok=True)
@@ -47,6 +63,9 @@ def _append_to_full_results(results_dir: str, record: dict):
         json.dump(data, f, indent=2)
 
 
+# =========================================================
+# Infer dataset name
+# =========================================================
 def _infer_dataset_name_from_processed_dir(processed_dir: str) -> str:
     """
     processed_dir example:
@@ -60,8 +79,52 @@ def _infer_dataset_name_from_processed_dir(processed_dir: str) -> str:
         return "unknown"
 
 
+# =========================================================
+# Class weights
+# =========================================================
+def _compute_class_weights_from_train_ds(train_ds, num_classes: int) -> Dict[int, float]:
+    """
+    train_ds labels are one-hot because make_datasets uses label_mode="categorical".
+    """
+    y_all: List[int] = []
+    for _, y in train_ds:
+        y_np = y.numpy()
+        y_all.extend(np.argmax(y_np, axis=1).tolist())
+
+    y_all = np.array(y_all, dtype=int)
+    weights = compute_class_weight(
+        class_weight="balanced",
+        classes=np.arange(num_classes),
+        y=y_all
+    )
+    return {int(i): float(w) for i, w in enumerate(weights)}
+
+
+# =========================================================
+# Backbone name normalize
+# =========================================================
+def _normalize_backbone_name(name: str) -> str:
+    if not name:
+        return name
+    n = str(name).strip().lower().replace("-", "").replace("_", "")
+    alias = {
+        "efficientnet": "EfficientNetV2B0",
+        "efficientnetv2b0": "EfficientNetV2B0",
+        "densenet": "DenseNet121",
+        "densenet121": "DenseNet121",
+        "inceptionresnet": "InceptionResNetV2",
+        "inceptionresnetv2": "InceptionResNetV2",
+    }
+    return alias.get(n, str(name).strip())
+
+
+# =========================================================
+# Train ONE backbone
+# =========================================================
 def _train_one_backbone(socketio, cfg: tcnn.TrainConfig, backbone_name: str, dataset_name: str) -> dict:
-    # 1) Build datasets
+    backbone_name = _normalize_backbone_name(backbone_name)
+
+    # 1) Build datasets (uses sibling val folder if processed_dir points to .../train)
     train_ds, val_ds, class_names, steps_per_epoch = tcnn.make_datasets(
         processed_dir=cfg.processed_dir,
         image_size=cfg.image_size,
@@ -75,13 +138,18 @@ def _train_one_backbone(socketio, cfg: tcnn.TrainConfig, backbone_name: str, dat
     if num_classes <= 0:
         raise RuntimeError("No classes found in dataset folder. Check processed_dir structure.")
 
-    # 2) Create run folder
-    run_dir = make_run_dir(cfg.processed_dir, dataset_name, backbone_name)
+    # 2) Class weights (imbalance handling)
+    class_weight_dict = _compute_class_weights_from_train_ds(train_ds, num_classes)
+    _emit(socketio, "training_log", {"message": f"⚖️ Using class_weight: {class_weight_dict}"})
 
-    _emit(socketio, "training_log", {"message": f"🔧 Training ONE model: {backbone_name} | dataset={dataset_name}"})
+    # 3) Create run folder (this function should place it under STORAGE_ROOT/<dataset>/runs)
+    run_dir = make_run_dir(cfg.processed_dir, dataset_name, backbone_name)
+    run_dir = Path(run_dir)
+
+    _emit(socketio, "training_log", {"message": f"🔧 Training: {backbone_name} | dataset={dataset_name}"})
     _emit(socketio, "training_log", {"message": f"📁 Run folder: {run_dir}"})
 
-    # 3) Build model
+    # 4) Build model
     model = tcnn.build_model(
         backbone_name=backbone_name,
         image_size=cfg.image_size,
@@ -90,15 +158,16 @@ def _train_one_backbone(socketio, cfg: tcnn.TrainConfig, backbone_name: str, dat
         seed=cfg.seed,
     )
 
-    # 4) Callbacks
+    # 5) Paths
     best_weights_path = run_dir / "best.weights.h5"
     last_weights_path = run_dir / "last.weights.h5"
     best_model_path = run_dir / "best_model.keras"
     signature_path = run_dir / "model_signature.json"
     log_csv_path = run_dir / "train_log.csv"
 
+    # 6) Callbacks
     callbacks = [
-        # Save best weights
+        # Best weights
         ModelCheckpoint(
             filepath=str(best_weights_path),
             monitor="val_accuracy",
@@ -107,7 +176,7 @@ def _train_one_backbone(socketio, cfg: tcnn.TrainConfig, backbone_name: str, dat
             mode="max",
             verbose=1,
         ),
-        # Save last weights every epoch (so you always have something)
+        # Last weights (always overwritten)
         ModelCheckpoint(
             filepath=str(last_weights_path),
             monitor="val_accuracy",
@@ -121,6 +190,7 @@ def _train_one_backbone(socketio, cfg: tcnn.TrainConfig, backbone_name: str, dat
         tcnn.SocketProgressCallback(socketio, backbone_name, cfg.epochs, steps_per_epoch),
     ]
 
+    # 7) Train (warmup + finetune)
     t0 = time.time()
     hist_all: Dict[str, List[float]] = {}
 
@@ -129,8 +199,9 @@ def _train_one_backbone(socketio, cfg: tcnn.TrainConfig, backbone_name: str, dat
             hist_all.setdefault(k, [])
             hist_all[k].extend([float(x) for x in v])
 
-    # 5) Stage 1 (warmup)
-    warmup = min(cfg.warmup_epochs, cfg.epochs)
+    warmup = min(int(cfg.warmup_epochs), int(cfg.epochs))
+
+    # Stage 1
     if hasattr(model, "backbone"):
         model.backbone.trainable = False
 
@@ -147,11 +218,12 @@ def _train_one_backbone(socketio, cfg: tcnn.TrainConfig, backbone_name: str, dat
             epochs=warmup,
             callbacks=callbacks,
             verbose=0,
+            class_weight=class_weight_dict,
         )
         _merge(h1)
 
-    # 6) Stage 2 (fine-tune)
-    remaining = cfg.epochs - warmup
+    # Stage 2
+    remaining = int(cfg.epochs) - warmup
     if remaining > 0:
         if hasattr(model, "backbone"):
             model.backbone.trainable = True
@@ -166,15 +238,31 @@ def _train_one_backbone(socketio, cfg: tcnn.TrainConfig, backbone_name: str, dat
             train_ds,
             validation_data=val_ds,
             initial_epoch=warmup,
-            epochs=cfg.epochs,
+            epochs=int(cfg.epochs),
             callbacks=callbacks,
             verbose=0,
+            class_weight=class_weight_dict,
         )
         _merge(h2)
 
     elapsed = time.time() - t0
 
-    # 7) Rebuild + load best weights (keeps your current safe approach)
+    # 8) Make sure best.weights.h5 exists (fallback to last)
+    if not best_weights_path.exists():
+        if last_weights_path.exists():
+            try:
+                import shutil
+                shutil.copy2(str(last_weights_path), str(best_weights_path))
+                _emit(socketio, "training_log", {"message": "⚠️ best.weights.h5 missing → copied from last.weights.h5"})
+            except Exception as e:
+                _emit(socketio, "training_log", {"message": f"⚠️ Could not copy last→best weights: {e}"})
+
+    if not best_weights_path.exists():
+        # last fallback: save current weights
+        model.save_weights(str(best_weights_path))
+        _emit(socketio, "training_log", {"message": "⚠️ best.weights.h5 missing → saved current weights as best.weights.h5"})
+
+    # 9) Rebuild a clean model + load best weights (avoids mismatch issues)
     best_model = tcnn.build_model(
         backbone_name=backbone_name,
         image_size=cfg.image_size,
@@ -182,20 +270,14 @@ def _train_one_backbone(socketio, cfg: tcnn.TrainConfig, backbone_name: str, dat
         dropout=cfg.dropout,
         seed=cfg.seed,
     )
-
-    if best_weights_path.exists():
-        best_model.load_weights(str(best_weights_path))
-    else:
-        best_model.set_weights(model.get_weights())
-        best_model.save_weights(str(best_weights_path))
-
+    best_model.load_weights(str(best_weights_path))
     best_model.compile(
         optimizer=keras.optimizers.Adam(cfg.fine_tune_lr),
         loss="categorical_crossentropy",
         metrics=["accuracy"],
     )
 
-    # 7b) Save model signature (helps prediction pick correct architecture)
+    # 10) Save model signature
     signature = {
         "dataset": dataset_name,
         "backbone": backbone_name,
@@ -204,6 +286,7 @@ def _train_one_backbone(socketio, cfg: tcnn.TrainConfig, backbone_name: str, dat
         "num_classes": int(num_classes),
         "class_names": class_names,
         "best_weights_path": str(best_weights_path),
+        "last_weights_path": str(last_weights_path),
         "best_model_path": str(best_model_path),
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
@@ -213,15 +296,14 @@ def _train_one_backbone(socketio, cfg: tcnn.TrainConfig, backbone_name: str, dat
     except Exception as e:
         _emit(socketio, "training_log", {"message": f"⚠️ Could not save model_signature.json: {e}"})
 
-    # 7c) Save FULL model too (for easiest prediction)
-    # If your model contains Lambda layers, this might fail to load later unless safe_mode=False.
+    # 11) Save full model too (should be safe now: NO Lambda in training_cnn_v2.py)
     try:
         best_model.save(str(best_model_path), include_optimizer=False)
-        _emit(socketio, "training_log", {"message": f"💾 Saved full model: {best_model_path}"})
+        _emit(socketio, "training_log", {"message": f"💾 Saved full model: {best_model_path.name}"})
     except Exception as e:
         _emit(socketio, "training_log", {"message": f"⚠️ Could not save full model (.keras): {e}"})
 
-    # 8) Save artifacts + metrics.json inside run_dir
+    # 12) Save artifacts (curves, confusion_matrix.png, metrics.json, report.txt, evaluation.json, etc.)
     artifacts_summary = save_training_artifacts(
         run_dir=run_dir,
         history=hist_all,
@@ -238,26 +320,29 @@ def _train_one_backbone(socketio, cfg: tcnn.TrainConfig, backbone_name: str, dat
             "processed_dir": cfg.processed_dir,
             "num_classes": num_classes,
             "class_names": class_names,
-            "epochs": cfg.epochs,
-            "warmup_epochs": cfg.warmup_epochs,
-            "batch_size": cfg.batch_size,
+            "epochs": int(cfg.epochs),
+            "warmup_epochs": int(cfg.warmup_epochs),
+            "batch_size": int(cfg.batch_size),
             "image_size": list(cfg.image_size) if isinstance(cfg.image_size, tuple) else cfg.image_size,
-            "lr": cfg.lr,
-            "fine_tune_lr": cfg.fine_tune_lr,
-            "dropout": cfg.dropout,
-            "seed": cfg.seed,
+            "lr": float(cfg.lr),
+            "fine_tune_lr": float(cfg.fine_tune_lr),
+            "dropout": float(cfg.dropout),
+            "seed": int(cfg.seed),
+            "class_weight": class_weight_dict,
         },
     )
-
     _emit(socketio, "training_log", {"message": f"📊 Saved artifacts to: {run_dir}"})
 
-    # 9) evaluation.json
+
+    # 13) evaluation.json (explicit, in case you read it in other pages)
     eval_payload = tcnn.evaluate_model(best_model, val_ds)
     eval_payload.update({
         "model": backbone_name,
         "dataset": dataset_name,
         "num_classes": num_classes,
         "class_names": class_names,
+        "image_size": list(cfg.image_size) if isinstance(cfg.image_size, tuple) else cfg.image_size,
+        "dropout": float(cfg.dropout),
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "run_dir": str(run_dir),
         "best_weights_path": str(best_weights_path),
@@ -269,6 +354,7 @@ def _train_one_backbone(socketio, cfg: tcnn.TrainConfig, backbone_name: str, dat
     with open(eval_path, "w", encoding="utf-8") as f:
         json.dump(eval_payload, f, indent=2)
 
+    # best val acc
     best_val_acc = float(max(hist_all.get("val_accuracy", [0.0])))
 
     record = {
@@ -301,33 +387,27 @@ def _train_one_backbone(socketio, cfg: tcnn.TrainConfig, backbone_name: str, dat
         "status": "ok",
         "results": [record],
         "run_dir": str(run_dir),
-        "run_id": Path(run_dir).name,
+        "run_id": run_dir.name,
         "dataset": dataset_name,
         "model": backbone_name
     })
     return record
 
 
-def _normalize_backbone_name(name: str) -> str:
-    if not name:
-        return name
-    n = str(name).strip().lower().replace("-", "").replace("_", "")
-    alias = {
-        "efficientnet": "EfficientNetV2B0",
-        "efficientnetv2b0": "EfficientNetV2B0",
-        "densenet": "DenseNet121",
-        "densenet121": "DenseNet121",
-        "inceptionresnet": "InceptionResNetV2",
-        "inceptionresnetv2": "InceptionResNetV2",
-    }
-    return alias.get(n, str(name).strip())
-
-
+# =========================================================
+# Main entry called by app.py
+# =========================================================
 def run_cnn_training(socketio, payload: dict):
     """
-    Run training:
-    - If payload["model"] is provided -> train only that model
-    - Else -> train the 3 required backbones sequentially
+    payload expected from app.py:
+      dataset: "aptos2019" | "drtid"
+      processed_dir: ".../processed_final/train"
+      epochs, batch_size, img_size, warmup_epochs, lr, fine_tune_lr, dropout, cache_dataset, seed
+      model: optional backbone name to train only one backbone
+
+    Runs:
+      - one backbone (if payload["model"] provided)
+      - otherwise trains the 3 backbones sequentially
     """
     try:
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -340,15 +420,16 @@ def run_cnn_training(socketio, payload: dict):
             return None
 
         dataset_name = (payload.get("dataset") or _infer_dataset_name_from_processed_dir(processed_dir)).strip().lower()
+        img_size = int(payload.get("img_size", 224))
 
         cfg = tcnn.TrainConfig(
-            processed_dir=processed_dir,
-            models_dir=models_dir,
-            results_dir=results_dir,
+            processed_dir=str(processed_dir),
+            models_dir=str(models_dir),
+            results_dir=str(results_dir),
             epochs=int(payload.get("epochs", 20)),
             warmup_epochs=int(payload.get("warmup_epochs", 2)),
             batch_size=int(payload.get("batch_size", 16)),
-            image_size=(int(payload.get("img_size", 224)), int(payload.get("img_size", 224))),
+            image_size=(img_size, img_size),
             lr=float(payload.get("lr", 1e-4)),
             fine_tune_lr=float(payload.get("fine_tune_lr", 1e-5)),
             dropout=float(payload.get("dropout", 0.3)),
@@ -356,7 +437,7 @@ def run_cnn_training(socketio, payload: dict):
             seed=int(payload.get("seed", 123)),
         )
 
-        _emit(socketio, "training_log", {"message": f"✅ Dataset: {dataset_name}"})
+        _emit(socketio, "training_log", {"message": f"✅ Dataset: {dataset_name} | img_size={img_size} | batch={cfg.batch_size}"})
 
         model_name = payload.get("model")
         if model_name:

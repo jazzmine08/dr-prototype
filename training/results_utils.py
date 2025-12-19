@@ -51,18 +51,13 @@ def make_run_dir(processed_dir: Union[str, Path], dataset_name: str, backbone_na
     Expected processed_dir:
       .../<dataset>/processed_final/train
     Then dataset_base = .../<dataset>/
-
-    Example:
-      G:\\My Drive\\dr_prototype\\processed\\aptos2019\\runs\\2025-12-16_15-22-10_DenseNet50
     """
     p = Path(processed_dir).resolve()
 
     # processed_final/train -> parents[1] is dataset folder
-    # .../<dataset>/processed_final/train
     try:
         dataset_base = p.parents[1]
     except Exception:
-        # fallback: put runs next to processed_dir
         dataset_base = p.parent
 
     runs_base = dataset_base / "runs"
@@ -70,7 +65,7 @@ def make_run_dir(processed_dir: Union[str, Path], dataset_name: str, backbone_na
 
     run_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     safe_backbone = _safe_name(backbone_name)
-    safe_dataset = _safe_name(dataset_name) or "unknown"
+    _ = _safe_name(dataset_name) or "unknown"
 
     run_dir = runs_base / f"{run_id}_{safe_backbone}"
     _ensure_dir(run_dir)
@@ -95,8 +90,6 @@ def save_training_artifacts(
       - confusion_matrix.png
       - report.txt
       - metrics.json
-
-    IMPORTANT: Does NOT create run_dir; caller creates it via make_run_dir().
     """
     run_dir = Path(run_dir)
     _ensure_dir(run_dir)
@@ -120,33 +113,49 @@ def save_training_artifacts(
     hist_df.to_csv(hist_path, index=False)
 
     # -----------------------
-    # 2) Curves
+    # 2) Curves (robust to metric key names)
     # -----------------------
-    def _plot_curve(keys: Tuple[str, str], title: str, out_name: str):
-        k_train, k_val = keys
-        if (k_train not in hist) and (k_val not in hist):
+    def _plot_curve_multi(train_keys, val_keys, title: str, out_name: str):
+        k_train = next((k for k in train_keys if k in hist), None)
+        k_val = next((k for k in val_keys if k in hist), None)
+        if (k_train is None) and (k_val is None):
             return
+
         fig = plt.figure()
-        if k_train in hist:
+        if k_train is not None:
             plt.plot(hist[k_train])
-        if k_val in hist:
+        if k_val is not None:
             plt.plot(hist[k_val])
+
         plt.title(title)
         plt.xlabel("Epoch")
         plt.ylabel(title)
+
         labels = []
-        if k_train in hist:
+        if k_train is not None:
             labels.append("train")
-        if k_val in hist:
+        if k_val is not None:
             labels.append("val")
         if labels:
             plt.legend(labels, loc="best")
+
         plt.tight_layout()
         plt.savefig(run_dir / out_name, dpi=150)
         plt.close(fig)
 
-    _plot_curve(("accuracy", "val_accuracy"), "Accuracy", "curves_accuracy.png")
-    _plot_curve(("loss", "val_loss"), "Loss", "curves_loss.png")
+    # accuracy sometimes saved as categorical_accuracy
+    _plot_curve_multi(
+        train_keys=("accuracy", "categorical_accuracy"),
+        val_keys=("val_accuracy", "val_categorical_accuracy"),
+        title="Accuracy",
+        out_name="curves_accuracy.png",
+    )
+    _plot_curve_multi(
+        train_keys=("loss",),
+        val_keys=("val_loss",),
+        title="Loss",
+        out_name="curves_loss.png",
+    )
 
     # -----------------------
     # 3) Predictions on val_ds
@@ -154,8 +163,7 @@ def save_training_artifacts(
     y_true_all: List[int] = []
     y_pred_all: List[int] = []
 
-    for batch in val_ds:
-        x, y = batch
+    for x, y in val_ds:
         pred = model.predict(x, verbose=0)
         pred_cls = np.argmax(pred, axis=1).astype(int).tolist()
 
@@ -167,6 +175,12 @@ def save_training_artifacts(
 
         y_true_all.extend(true_cls)
         y_pred_all.extend(pred_cls)
+
+    # debug label distribution (optional)
+    try:
+        print("DEBUG y_true counts:", np.bincount(np.array(y_true_all), minlength=5).tolist())
+    except Exception as e:
+        print("DEBUG y_true counts: failed:", repr(e))
 
     num_classes = len(class_names)
     labels = list(range(num_classes))
@@ -185,15 +199,37 @@ def save_training_artifacts(
     (run_dir / "report.txt").write_text(report, encoding="utf-8")
 
     fig = plt.figure()
-    plt.imshow(cm)
-    plt.title("Confusion Matrix")
-    plt.xlabel("Predicted")
-    plt.ylabel("True")
-    plt.colorbar()
-    plt.xticks(range(num_classes), class_names, rotation=45, ha="right")
-    plt.yticks(range(num_classes), class_names)
+        # -----------------------
+    # Confusion matrix plot (with numbers)
+    # -----------------------
+    fig = plt.figure(figsize=(7.2, 6.4))
+    ax = plt.gca()
+
+    im = ax.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
+    ax.set_title("Confusion Matrix")
+    plt.colorbar(im, ax=ax)
+
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("True")
+
+    ax.set_xticks(np.arange(num_classes))
+    ax.set_yticks(np.arange(num_classes))
+    ax.set_xticklabels(class_names, rotation=45, ha="right")
+    ax.set_yticklabels(class_names)
+
+    # write numbers in each cell
+    thresh = cm.max() / 2.0 if cm.size else 0
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(
+                j, i, str(int(cm[i, j])),
+                ha="center", va="center",
+                color="white" if cm[i, j] > thresh else "black",
+                fontsize=10
+            )
+
     plt.tight_layout()
-    plt.savefig(run_dir / "confusion_matrix.png", dpi=150)
+    plt.savefig(run_dir / "confusion_matrix.png", dpi=170)
     plt.close(fig)
 
     # -----------------------
@@ -201,8 +237,12 @@ def save_training_artifacts(
     # -----------------------
     best_val_acc = None
     best_val_loss = None
-    if "val_accuracy" in hist and len(hist["val_accuracy"]) > 0:
-        best_val_acc = max(hist["val_accuracy"])
+
+    # best_val_accuracy might be stored under val_accuracy OR val_categorical_accuracy
+    val_acc_key = "val_accuracy" if "val_accuracy" in hist else ("val_categorical_accuracy" if "val_categorical_accuracy" in hist else None)
+    if val_acc_key and len(hist.get(val_acc_key, [])) > 0:
+        best_val_acc = max(hist[val_acc_key])
+
     if "val_loss" in hist and len(hist["val_loss"]) > 0:
         best_val_loss = min(hist["val_loss"])
 
@@ -227,7 +267,7 @@ def save_training_artifacts(
             "report.txt": str(run_dir / "report.txt"),
         },
 
-        "extra": meta,  # keep all meta for traceability
+        "extra": meta,
     }
 
     (run_dir / "metrics.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

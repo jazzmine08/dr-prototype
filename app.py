@@ -1,5 +1,8 @@
 # app.py
 # Prototype: Preprocessing + EDA + Training (3 CNN) + Ensemble + Results + Predict (APTOS + DRTiD)
+# ✅ Revised: APTOS and DRTiD use the SAME preprocessing conditions + SAME deterministic train/val split
+#            so training + ensemble always see identical folder layout:
+#            <processed_final>/train/<0..4> and <processed_final>/val/<0..4>
 
 from __future__ import annotations
 
@@ -8,6 +11,7 @@ import time
 import json
 import base64
 import traceback
+import hashlib
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -45,6 +49,27 @@ def _label_from_index(idx: int) -> str:
     except Exception:
         return str(idx)
     return CLASS_LABELS_5.get(idx, f"Class {idx}")
+
+
+# =========================================================
+# SPLIT SETTINGS (applies equally to APTOS + DRTiD)
+# =========================================================
+VAL_RATIO = 0.20     # 80/20 split
+SPLIT_SEED = 123     # deterministic split seed
+
+def _stable_bucket(s: str, seed: int = SPLIT_SEED) -> float:
+    """
+    Deterministic pseudo-random in [0,1) from string.
+    Same image_id will always go to same split across runs/machines.
+    """
+    s = (s or "").strip()
+    h = hashlib.md5(f"{seed}::{s}".encode("utf-8")).hexdigest()
+    # use first 8 hex chars -> 32-bit int
+    v = int(h[:8], 16)
+    return (v % 1_000_000) / 1_000_000.0
+
+def _assign_split(image_id: str, val_ratio: float = VAL_RATIO, seed: int = SPLIT_SEED) -> str:
+    return "val" if _stable_bucket(image_id, seed=seed) < float(val_ratio) else "train"
 
 
 # =========================================================
@@ -102,11 +127,9 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
 }
 
-
 def _safe_ds(dataset_name: str) -> str:
     ds = (dataset_name or "aptos2019").strip().lower()
     return ds if ds in DATASET_REGISTRY else "aptos2019"
-
 
 def get_dataset_info(dataset_name: str) -> Dict[str, Any]:
     dataset_name = _safe_ds(dataset_name)
@@ -115,20 +138,24 @@ def get_dataset_info(dataset_name: str) -> Dict[str, Any]:
     info["processed_base"].mkdir(parents=True, exist_ok=True)
     return info
 
-
 def get_output_paths(dataset_name: str) -> Dict[str, Path]:
     """
     Output per dataset:
       <STORAGE_ROOT>/<dataset>/processed_final/train/<0..4>/*.png
+      <STORAGE_ROOT>/<dataset>/processed_final/val/<0..4>/*.png   ✅ (now created)
       <STORAGE_ROOT>/<dataset>/processed_final/test/*.png
     """
     base = get_dataset_info(dataset_name)["processed_base"] / "processed_final"
-    return {"base": base, "train": base / "train", "test": base / "test"}
+    return {
+        "base": base,
+        "train": base / "train",
+        "val": base / "val",
+        "test": base / "test",
+    }
 
-
-def ensure_class_folders(train_dir: Path, num_classes: int = 5):
+def ensure_class_folders(root_dir: Path, num_classes: int = 5):
     for c in range(num_classes):
-        (train_dir / str(c)).mkdir(parents=True, exist_ok=True)
+        (root_dir / str(c)).mkdir(parents=True, exist_ok=True)
 
 
 # =========================================================
@@ -138,17 +165,14 @@ app = Flask(__name__, template_folder=str(TEMPLATE_DIR), static_folder=str(STATI
 app.config["SECRET_KEY"] = "secretkey"
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-
 @app.errorhandler(500)
 def _err_500(e):
-    # Always return JSON for /api/*
     if request.path.startswith("/api/"):
         return jsonify({
             "status": "error",
             "message": "Internal Server Error",
             "path": request.path
         }), 500
-    # fallback to default html error
     return e
 
 
@@ -159,31 +183,25 @@ def _err_500(e):
 def index():
     return render_template("index.html")
 
-
 @app.route("/preprocessing")
 def preprocessing_page():
     return render_template("preprocessing.html")
-
 
 @app.route("/eda")
 def eda_page():
     return render_template("eda.html")
 
-
 @app.route("/training")
 def training_page():
     return render_template("training.html")
-
 
 @app.route("/ensemble")
 def ensemble_page():
     return render_template("ensemble.html")
 
-
 @app.route("/results")
 def results_page():
     return render_template("results.html")
-
 
 @app.route("/predict")
 def predict_page():
@@ -208,7 +226,6 @@ def _strip_ext(name: str) -> str:
             return base[:-len(ext)]
     return base
 
-
 def find_image(folder: Path, image_id: str, default_ext: str) -> str:
     folder = Path(folder)
     image_id = str(image_id).strip()
@@ -229,13 +246,11 @@ def find_image(folder: Path, image_id: str, default_ext: str) -> str:
 
     return ""
 
-
 def img_to_base64_png(img_bgr: np.ndarray) -> str:
     ok, buf = cv2.imencode(".png", img_bgr)
     if not ok:
         return ""
     return base64.b64encode(buf.tobytes()).decode("utf-8")
-
 
 def _json_error(message: str, http: int = 500, **extra):
     payload = {"status": "error", "message": message}
@@ -244,7 +259,7 @@ def _json_error(message: str, http: int = 500, **extra):
 
 
 # =========================================================
-# PREPROCESSING PIPELINE
+# PREPROCESSING PIPELINE (same for APTOS + DRTiD)
 # =========================================================
 def preprocess_image(img_bgr: np.ndarray) -> np.ndarray:
     # Crop foreground
@@ -280,17 +295,14 @@ def preprocess_image(img_bgr: np.ndarray) -> np.ndarray:
     g = cv2.addWeighted(g, 1.6, blur, -0.6, 0)
     img_bgr[:, :, 1] = np.clip(g, 0, 255).astype(np.uint8)
 
-    # base predict preprocessing size
+    # base preprocessing size for storage
     return cv2.resize(img_bgr, (224, 224), interpolation=cv2.INTER_AREA)
-
 
 def _pp_log(msg: str):
     socketio.emit("preprocess_log", {"message": msg})
 
-
 def _pp_err(msg: str):
     socketio.emit("preprocess_error", {"message": msg})
-
 
 def _pp_progress(percent: int, processed: int, total: int, phase: str = ""):
     socketio.emit("preprocess_progress", {
@@ -300,22 +312,30 @@ def _pp_progress(percent: int, processed: int, total: int, phase: str = ""):
         "phase": phase or ""
     })
 
-
 def _pp_done(msg: str):
     socketio.emit("preprocess_done", {"message": msg})
 
-
 def preprocess_dataset_worker(dataset_name: str, limit: Optional[int] = None):
+    """
+    ✅ Now writes TRAIN and VAL folders deterministically for both APTOS + DRTiD:
+      processed_final/train/<class>/*.png
+      processed_final/val/<class>/*.png
+    """
     try:
         dataset_name = _safe_ds(dataset_name)
         info = get_dataset_info(dataset_name)
         out = get_output_paths(dataset_name)
         out_train = out["train"]
+        out_val = out["val"]
         out_test = out["test"]
 
         out_train.mkdir(parents=True, exist_ok=True)
+        out_val.mkdir(parents=True, exist_ok=True)
         out_test.mkdir(parents=True, exist_ok=True)
-        ensure_class_folders(out_train, num_classes=int(info.get("num_classes", 5)))
+
+        num_classes = int(info.get("num_classes", 5))
+        ensure_class_folders(out_train, num_classes=num_classes)
+        ensure_class_folders(out_val, num_classes=num_classes)
 
         # validate raw paths
         for k in ["train_csv", "train_img_dir", "test_csv", "test_img_dir"]:
@@ -326,6 +346,7 @@ def preprocess_dataset_worker(dataset_name: str, limit: Optional[int] = None):
 
         _pp_log(f"🟢 Preprocessing started [{dataset_name}]")
         _pp_log(f"📦 Output base: {out['base']}")
+        _pp_log(f"🔀 Split: train={1.0-VAL_RATIO:.0%} val={VAL_RATIO:.0%} seed={SPLIT_SEED}")
 
         train_df = pd.read_csv(info["train_csv"])
         test_df = pd.read_csv(info["test_csv"])
@@ -358,21 +379,26 @@ def preprocess_dataset_worker(dataset_name: str, limit: Optional[int] = None):
         _pp_progress(0, 0, total_items, "starting")
         socketio.sleep(0)
 
-        # TRAIN
+        # TRAIN/VAL
         processed_train = 0
+        processed_val = 0
         skipped_train = 0
         t0 = time.time()
 
         for _, row in train_df.iterrows():
             img_id = row[id_col]
+            img_id_str = str(img_id).strip()
+
             try:
                 label = int(row[label_col])
+                if label < 0 or label >= num_classes:
+                    raise ValueError("label_out_of_range")
             except Exception:
                 skipped_train += 1
                 done_items += 1
                 continue
 
-            img_path = find_image(Path(info["train_img_dir"]), str(img_id), default_ext)
+            img_path = find_image(Path(info["train_img_dir"]), img_id_str, default_ext)
             if not img_path:
                 skipped_train += 1
                 done_items += 1
@@ -385,20 +411,31 @@ def preprocess_dataset_worker(dataset_name: str, limit: Optional[int] = None):
                 continue
 
             out_img = preprocess_image(img)
-            out_name = f"{_strip_ext(str(img_id))}.png"
-            save_path = out_train / str(label) / out_name
-            cv2.imwrite(str(save_path), out_img)
+            out_name = f"{_strip_ext(img_id_str)}.png"
 
-            processed_train += 1
+            split = _assign_split(_strip_ext(img_id_str), val_ratio=VAL_RATIO, seed=SPLIT_SEED)
+            if split == "val":
+                save_path = out_val / str(label) / out_name
+                processed_val += 1
+                phase = "val"
+            else:
+                save_path = out_train / str(label) / out_name
+                processed_train += 1
+                phase = "train"
+
+            cv2.imwrite(str(save_path), out_img)
             done_items += 1
 
             if done_items % 50 == 0 or done_items == total_items:
                 pct = int(round(100.0 * done_items / max(total_items, 1)))
-                _pp_progress(pct, done_items, total_items, "train")
+                _pp_progress(pct, done_items, total_items, phase)
                 socketio.sleep(0)
 
-            if processed_train % 200 == 0:
-                _pp_log(f"✅ [{dataset_name}] Train processed: {processed_train} | skipped: {skipped_train} | {time.time()-t0:.1f}s")
+            if (processed_train + processed_val) % 300 == 0:
+                _pp_log(
+                    f"✅ [{dataset_name}] Train={processed_train} Val={processed_val} "
+                    f"| skipped={skipped_train} | {time.time()-t0:.1f}s"
+                )
 
         # TEST
         processed_test = 0
@@ -407,7 +444,9 @@ def preprocess_dataset_worker(dataset_name: str, limit: Optional[int] = None):
 
         for _, row in test_df.iterrows():
             img_id = row[test_id_col]
-            img_path = find_image(Path(info["test_img_dir"]), str(img_id), default_ext)
+            img_id_str = str(img_id).strip()
+
+            img_path = find_image(Path(info["test_img_dir"]), img_id_str, default_ext)
             if not img_path:
                 skipped_test += 1
                 done_items += 1
@@ -420,7 +459,7 @@ def preprocess_dataset_worker(dataset_name: str, limit: Optional[int] = None):
                 continue
 
             out_img = preprocess_image(img)
-            out_name = f"{_strip_ext(str(img_id))}.png"
+            out_name = f"{_strip_ext(img_id_str)}.png"
             save_path = out_test / out_name
             cv2.imwrite(str(save_path), out_img)
 
@@ -432,14 +471,14 @@ def preprocess_dataset_worker(dataset_name: str, limit: Optional[int] = None):
                 _pp_progress(pct, done_items, total_items, "test")
                 socketio.sleep(0)
 
-            if processed_test % 200 == 0:
+            if processed_test % 300 == 0:
                 _pp_log(f"✅ [{dataset_name}] Test processed: {processed_test} | skipped: {skipped_test} | {time.time()-t1:.1f}s")
 
         _pp_progress(100, total_items, total_items, "done")
         socketio.sleep(0)
 
         _pp_done(
-            f"🎉 Done [{dataset_name}] | Train: {processed_train} (skipped {skipped_train}) | "
+            f"🎉 Done [{dataset_name}] | Train: {processed_train} | Val: {processed_val} (skipped {skipped_train}) | "
             f"Test: {processed_test} (skipped {skipped_test}) | Output: {out['base']}"
         )
 
@@ -463,7 +502,6 @@ def start_preprocessing():
         def _worker_all():
             for ds in DATASET_REGISTRY.keys():
                 preprocess_dataset_worker(ds, limit=limit_int)
-
         socketio.start_background_task(_worker_all)
         return jsonify({"status": "ok", "message": "Preprocessing started for ALL datasets..."})
 
@@ -482,6 +520,7 @@ def preprocess_samples():
 
     out = get_output_paths(dataset_name)
     train_dir = out["train"]
+    val_dir = out["val"]
     raw_train_dir = Path(info["train_img_dir"])
     default_ext = info.get("ext", ".png")
 
@@ -489,12 +528,14 @@ def preprocess_samples():
     samples = []
 
     def _find_one_processed_in_class(c: int) -> Optional[Path]:
-        d = train_dir / str(c)
-        if not d.exists():
-            return None
-        for p in d.iterdir():
-            if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg"):
-                return p
+        # prefer train, fallback val
+        for root in (train_dir, val_dir):
+            d = root / str(c)
+            if not d.exists():
+                continue
+            for p in d.iterdir():
+                if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg"):
+                    return p
         return None
 
     for c in wanted:
@@ -623,14 +664,23 @@ def start_training():
 
     out = get_output_paths(dataset_name)
     out_train = out["train"]
-    ensure_class_folders(out_train, num_classes=int(get_dataset_info(dataset_name).get("num_classes", 5)))
+    out_val = out["val"]
+
+    # ensure folders exist for both datasets
+    num_classes = int(get_dataset_info(dataset_name).get("num_classes", 5))
+    ensure_class_folders(out_train, num_classes=num_classes)
+    ensure_class_folders(out_val, num_classes=num_classes)
 
     def _setdefault(k, v):
         if k not in payload or payload[k] in (None, "", "null"):
             payload[k] = v
 
     _setdefault("dataset", dataset_name)
+
+    # ✅ IMPORTANT: pass processed_dir as TRAIN folder.
+    # training_cnn_v2.make_datasets will detect sibling VAL folder.
     _setdefault("processed_dir", str(out_train))
+
     _setdefault("epochs", 20)
     _setdefault("batch_size", 16)
     _setdefault("img_size", 224)
@@ -644,7 +694,6 @@ def start_training():
     socketio.start_background_task(run_cnn_training, socketio, payload)
     return jsonify({"status": "ok", "message": f"Training started ({dataset_name})..."})
 
-
 @app.route("/api/train-three-cnn", methods=["POST"])
 def api_train_three_cnn():
     return start_training()
@@ -655,7 +704,6 @@ def api_train_three_cnn():
 # =========================================================
 _ALLOWED_RESULT_IMAGES = {"curves_accuracy.png", "curves_loss.png", "confusion_matrix.png"}
 
-
 @app.route("/api/results/list", methods=["GET"])
 def api_results_list():
     dataset = _safe_ds(request.args.get("dataset") or "aptos2019")
@@ -665,7 +713,6 @@ def api_results_list():
 
     runs = sorted([p.name for p in runs_dir.iterdir() if p.is_dir()], reverse=True)
     return jsonify({"status": "ok", "dataset": dataset, "runs": runs})
-
 
 @app.route("/api/results/get", methods=["GET"])
 def api_results_get():
@@ -722,7 +769,6 @@ def api_results_get():
         "images": images,
     })
 
-
 @app.route("/api/results/image", methods=["GET"])
 def api_results_image():
     dataset = _safe_ds(request.args.get("dataset") or "aptos2019")
@@ -740,7 +786,6 @@ def api_results_image():
 
     return send_file(path)
 
-
 def _extract_model_name_from_run(run_dir: Path) -> str:
     for p in (run_dir / "metrics.json", run_dir / "evaluation.json"):
         if not p.exists():
@@ -755,7 +800,6 @@ def _extract_model_name_from_run(run_dir: Path) -> str:
             pass
     return "unknown"
 
-
 def _extract_created_at_from_run(run_dir: Path) -> str:
     for p in (run_dir / "metrics.json", run_dir / "evaluation.json"):
         if not p.exists():
@@ -768,7 +812,6 @@ def _extract_created_at_from_run(run_dir: Path) -> str:
         except Exception:
             pass
     return ""
-
 
 @app.route("/api/results/list_detailed", methods=["GET"])
 def api_results_list_detailed():
@@ -801,6 +844,10 @@ def start_ensemble():
     payload.setdefault("dataset", "aptos2019")
     payload["dataset"] = _safe_ds(payload.get("dataset"))
 
+    # ✅ ensure processed_dir is always set consistently (train folder)
+    out = get_output_paths(payload["dataset"])
+    payload.setdefault("processed_dir", str(out["train"]))
+
     payload.setdefault("method", "softvote")
     payload.setdefault("batch_size", 16)
     payload.setdefault("img_size", 224)
@@ -813,7 +860,6 @@ def start_ensemble():
 
 _ALLOWED_ENSEMBLE_IMAGES = {"confusion_matrix.png"}
 
-
 @app.route("/api/ensemble/list", methods=["GET"])
 def api_ensemble_list():
     dataset = _safe_ds(request.args.get("dataset") or "aptos2019")
@@ -823,7 +869,6 @@ def api_ensemble_list():
 
     runs = sorted([p.name for p in ens_dir.iterdir() if p.is_dir()], reverse=True)
     return jsonify({"status": "ok", "dataset": dataset, "runs": runs})
-
 
 @app.route("/api/ensemble/get", methods=["GET"])
 def api_ensemble_get():
@@ -870,7 +915,6 @@ def api_ensemble_get():
         "images": images,
     })
 
-
 @app.route("/api/ensemble/image", methods=["GET"])
 def api_ensemble_image():
     dataset = _safe_ds(request.args.get("dataset") or "aptos2019")
@@ -905,7 +949,6 @@ def _normalize_backbone_name(name: str) -> str:
         "efficientnetv2b0": "EfficientNetV2B0",
     }
     return alias.get(n, str(name).strip())
-
 
 def _find_latest_run_for_backbone(dataset: str, backbone: str) -> Dict[str, Any]:
     runs_dir = STORAGE_ROOT / dataset / "runs"
@@ -971,7 +1014,6 @@ def _find_latest_run_for_backbone(dataset: str, backbone: str) -> Dict[str, Any]
         "dropout": float(dropout),
     }
 
-
 @app.route("/api/predict", methods=["POST"])
 def api_predict():
     """
@@ -1001,14 +1043,14 @@ def api_predict():
             try:
                 sig = _find_latest_run_for_backbone(dataset, b)
 
-                # IMPORTANT: match training image_size
+                # match training image_size
                 target_w, target_h = sig["image_size"][0], sig["image_size"][1]
                 proc_for_model = cv2.resize(proc_bgr_224, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
                 proc_rgb = cv2.cvtColor(proc_for_model, cv2.COLOR_BGR2RGB)
                 x = np.expand_dims(proc_rgb.astype(np.float32), axis=0)  # (1,H,W,3)
 
-                # IMPORTANT: match training dropout to avoid architecture mismatch
+                # match dropout to avoid mismatch
                 model = tcnn.build_model(
                     backbone_name=sig["backbone"],
                     image_size=sig["image_size"],
@@ -1021,8 +1063,6 @@ def api_predict():
                 pred = model.predict(x, verbose=0)
                 probs = pred[0].astype(float).tolist()
                 pred_idx = int(np.argmax(probs))
-
-                # ✅ label as severity text
                 pred_label = _label_from_index(pred_idx)
 
                 probs_list.append(probs)
@@ -1050,8 +1090,6 @@ def api_predict():
         if probs_list:
             avg = np.mean(np.array(probs_list, dtype=np.float32), axis=0).tolist()
             ens_idx = int(np.argmax(avg))
-
-            # ✅ label as severity text (fixes your "still number" issue)
             ens_label = _label_from_index(ens_idx)
 
             ensemble = {
