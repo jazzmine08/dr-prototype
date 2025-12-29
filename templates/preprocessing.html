@@ -113,8 +113,9 @@
       <button class="btn btn-outline-secondary" id="btnClear">Clear Log</button>
     </div>
     <div class="col-auto">
-      <button class="btn btn-outline-secondary" id="btnShowSamples" title="Load sample (original vs processed)">Show
-        Samples</button>
+      <button class="btn btn-outline-secondary" id="btnShowSamples" title="Load sample (original vs processed)">
+        Show Samples
+      </button>
     </div>
   </div>
 
@@ -174,7 +175,6 @@
 {% endblock %}
 
 {% block scripts %}
-<!-- Socket.IO client -->
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 
 <script>
@@ -192,7 +192,8 @@
   const progressBar = document.getElementById("progressBar");
   const progressText = document.getElementById("progressText");
 
-  const socket = io();
+  // IMPORTANT: Use current origin; this prevents mixed host/port issues
+  const socket = io(window.location.origin);
 
   function addLog(msg) {
     const ts = new Date().toLocaleTimeString();
@@ -200,16 +201,28 @@
     logBox.scrollTop = logBox.scrollHeight;
   }
 
-  function niceDatasetName(ds) {
-    if (ds === "aptos2019") return "Google Drive for Desktop (APTOS 2019)";
-    if (ds === "drtid") return "Google Drive for Desktop (DRTiD)";
+  // --- Labels for UI ---
+  function niceDatasetLabel(ds) {
+    if (ds === "aptos2019") return "APTOS 2019";
+    if (ds === "drtid") return "DRTiD";
     return ds;
+  }
+
+  // --- Shown only for user info (does not affect backend) ---
+  function datasetSourcePath(ds) {
+    if (ds === "aptos2019") return "X:\\dr_prototype\\dataset\\APTOS";
+    if (ds === "drtid") return "X:\\dr_prototype\\dataset\\DRTiD";
+    return `X:\\dr_prototype\\dataset\\${ds}`;
+  }
+
+  function datasetOutputPath(ds) {
+    return `X:\\dr_prototype\\processed\\${ds}\\processed_final\\`;
   }
 
   function updateSourceLine() {
     const ds = datasetSelect.value || "aptos2019";
-    sourceName.textContent = niceDatasetName(ds);
-    outputPath.textContent = `G:\\My Drive\\dr_prototype\\processed\\${ds}\\processed_final\\`;
+    sourceName.textContent = datasetSourcePath(ds);
+    outputPath.textContent = datasetOutputPath(ds);
   }
 
   function setProgress(pct, processed, total, phase) {
@@ -218,7 +231,9 @@
     progressText.textContent = `${safePct}% (${processed || 0} / ${total || 0})${phase ? " - " + phase : ""}`;
   }
 
-  function resetProgress() { setProgress(0, 0, 0, ""); }
+  function resetProgress() {
+    setProgress(0, 0, 0, "");
+  }
 
   function renderSamplePair(containerId, metaId, sample, ds) {
     const el = document.getElementById(containerId);
@@ -229,7 +244,7 @@
 
     if (!sample || (!sample.original && !sample.processed)) {
       el.innerHTML = `<span class="text-muted">No images yet.</span>`;
-      meta.textContent = `${ds}`;
+      meta.textContent = `${niceDatasetLabel(ds)}`;
       return;
     }
 
@@ -261,13 +276,32 @@
     if (sample.processed) wrap.appendChild(makeBlock("Processed", sample.processed));
 
     el.appendChild(wrap);
-    meta.textContent = `${ds}${sample.image_id ? " | " + sample.image_id : ""}`;
+    meta.textContent = `${niceDatasetLabel(ds)}${sample.image_id ? " | " + sample.image_id : ""}`;
+  }
+
+  // Safe JSON fetch helper: avoids "Unexpected token '<'"
+  async function fetchJson(url, opts) {
+    const res = await fetch(url, opts);
+    const text = await res.text();
+
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch (e) {
+      throw new Error(`Non-JSON response from ${url} (HTTP ${res.status}): ${text.slice(0, 120)}`);
+    }
+
+    if (!res.ok) {
+      const msg = (data && (data.message || data.error)) ? (data.message || data.error) : `HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+    return data;
   }
 
   async function loadSamples(ds) {
-    const url = `/preprocess_samples?dataset=${encodeURIComponent(ds)}`;
-    const res = await fetch(url);
-    const data = await res.json();
+    // ✅ UPDATED endpoint (matches cleaned app.py)
+    const url = `/api/preprocess_samples?dataset=${encodeURIComponent(ds)}`;
+    const data = await fetchJson(url);
 
     const samples = (data && data.samples) ? data.samples : [];
     const s0 = samples.find(s => Number(s.class) === 0);
@@ -280,19 +314,43 @@
   }
 
   async function loadDatasets() {
-    const res = await fetch("/datasets");
-    const data = await res.json();
     datasetSelect.innerHTML = "";
 
-    (data.datasets || []).forEach(ds => {
-      const opt = document.createElement("option");
-      opt.value = ds;
-      opt.textContent = (ds === "aptos2019") ? "APTOS 2019" : (ds === "drtid") ? "DRTiD" : ds;
-      datasetSelect.appendChild(opt);
-    });
+    try {
+      // ✅ UPDATED endpoint (matches cleaned app.py)
+      const data = await fetchJson("/api/datasets");
+      const datasets = (data && data.datasets) ? data.datasets : [];
 
-    if ([...datasetSelect.options].some(o => o.value === "aptos2019")) datasetSelect.value = "aptos2019";
-    updateSourceLine();
+      if (!datasets.length) throw new Error("No datasets returned.");
+
+      datasets.forEach(ds => {
+        const opt = document.createElement("option");
+        opt.value = ds;
+        opt.textContent = niceDatasetLabel(ds);
+        datasetSelect.appendChild(opt);
+      });
+
+      // default
+      if ([...datasetSelect.options].some(o => o.value === "aptos2019")) {
+        datasetSelect.value = "aptos2019";
+      } else if (datasetSelect.options.length) {
+        datasetSelect.value = datasetSelect.options[0].value;
+      }
+
+      updateSourceLine();
+      addLog(`✅ Loaded datasets: ${datasets.join(", ")}`);
+    } catch (err) {
+      // Fallback
+      ["aptos2019", "drtid"].forEach(ds => {
+        const opt = document.createElement("option");
+        opt.value = ds;
+        opt.textContent = niceDatasetLabel(ds);
+        datasetSelect.appendChild(opt);
+      });
+      datasetSelect.value = "aptos2019";
+      updateSourceLine();
+      addLog("⚠️ /api/datasets failed, using fallback options: aptos2019, drtid (" + err.message + ")");
+    }
   }
 
   datasetSelect.addEventListener("change", updateSourceLine);
@@ -311,7 +369,7 @@
       await loadSamples(ds);
       addLog(`✅ Samples loaded.`);
     } catch (e) {
-      addLog("❌ Failed to load samples: " + e);
+      addLog("❌ Failed to load samples: " + e.message);
     } finally {
       btnShowSamples.disabled = false;
     }
@@ -319,10 +377,10 @@
 
   btnStart.addEventListener("click", async () => {
     const ds = datasetSelect.value || "aptos2019";
-    const limitVal = limitInput.value && Number(limitInput.value) > 0 ? Number(limitInput.value) : null;
+    const limitVal = (limitInput.value && Number(limitInput.value) > 0) ? Number(limitInput.value) : null;
 
     resetProgress();
-    statusText.textContent = `Status: starting preprocessing (${ds})...`;
+    statusText.textContent = `Status: starting preprocessing (${niceDatasetLabel(ds)})...`;
     addLog(`▶️ Requesting preprocessing for dataset=${ds}${limitVal ? " limit=" + limitVal : ""}`);
     btnStart.disabled = true;
 
@@ -330,32 +388,27 @@
     if (limitVal) payload.limit = limitVal;
 
     try {
-      const resp = await fetch("/start_preprocessing", {
+      // ✅ UPDATED endpoint (matches cleaned app.py)
+      const out = await fetchJson("/api/start_preprocessing", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       });
 
-      const out = await resp.json();
-      if (out.status === "ok") {
-        statusText.textContent = `Status: running (${ds})`;
-        addLog(`✅ ${out.message}`);
-      } else {
-        statusText.textContent = `Status: error`;
-        addLog(`❌ ${out.message || "Unknown error"}`);
-        btnStart.disabled = false;
-      }
+      statusText.textContent = `Status: running (${niceDatasetLabel(ds)})`;
+      addLog(`✅ ${out.message || "Preprocessing started."}`);
     } catch (e) {
-      statusText.textContent = `Status: error`;
-      addLog(`❌ Failed to start preprocessing: ${e}`);
+      statusText.textContent = "Status: error";
+      addLog(`❌ Failed to start preprocessing: ${e.message}`);
       btnStart.disabled = false;
     }
   });
 
+  // Socket logs (these names must match what preprocessing.py emits)
   socket.on("connect", () => addLog("🔌 Socket connected."));
   socket.on("disconnect", () => addLog("⚠️ Socket disconnected."));
-  socket.on("preprocess_log", (data) => addLog((data && data.message) ? data.message : ""));
 
+  socket.on("preprocess_log", (data) => addLog((data && data.message) ? data.message : ""));
   socket.on("preprocess_progress", (data) => {
     const pct = (data && data.percent != null) ? data.percent : 0;
     const processed = (data && data.processed != null) ? data.processed : 0;
@@ -376,6 +429,8 @@
     btnStart.disabled = false;
   });
 
-  loadDatasets().catch(err => addLog("❌ Failed to load datasets: " + err));
+  // init
+  resetProgress();
+  loadDatasets().catch(err => addLog("❌ Failed to load datasets: " + err.message));
 </script>
 {% endblock %}

@@ -1,4 +1,3 @@
-<!-- templates/base.html -->
 <!doctype html>
 <html lang="en">
 
@@ -6,46 +5,56 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>{% block title %}DR Ensemble{% endblock %}</title>
-
-  <!-- Bootstrap -->
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
 </head>
 
 <body>
-  <!-- NAVBAR (ONE SOURCE OF TRUTH) -->
   <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
     <div class="container">
       <a class="navbar-brand fw-bold" href="/">DR Ensemble</a>
-
-      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav" aria-controls="nav"
-        aria-expanded="false" aria-label="Toggle navigation">
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav">
         <span class="navbar-toggler-icon"></span>
       </button>
 
-      <!-- ✅ your navbar block -->
       <div class="collapse navbar-collapse" id="nav">
         <ul class="navbar-nav me-auto mb-2 mb-lg-0">
           <li class="nav-item"><a class="nav-link" href="/">Home</a></li>
+
+          {% if session.get('user') %}
+          {% if session['user']['role'] == 'admin' %}
           <li class="nav-item"><a class="nav-link" href="/preprocessing">Preprocessing</a></li>
           <li class="nav-item"><a class="nav-link" href="/eda">EDA</a></li>
           <li class="nav-item"><a class="nav-link" href="/training">Training</a></li>
           <li class="nav-item"><a class="nav-link" href="/ensemble">Ensemble</a></li>
           <li class="nav-item"><a class="nav-link" href="/results">Results</a></li>
-          <li class="nav-item"><a class="nav-link" href="/predict">Prediction</a></li>
+          <li class="nav-item"><a class="nav-link" href="/predict">Predict (Full)</a></li>
+          {% else %}
+          <li class="nav-item"><a class="nav-link" href="/doctor_predict">Prediction</a></li>
+          {% endif %}
+          {% endif %}
+        </ul>
+
+        <ul class="navbar-nav ms-auto">
+          {% if session.get('user') %}
+          <li class="nav-item">
+            <span class="navbar-text me-3">
+              <i class="bi bi-person-circle"></i> {{ session['user']['username'] }}
+              <span class="badge bg-secondary">{{ session['user']['role'] }}</span>
+            </span>
+          </li>
+          <li class="nav-item"><a class="btn btn-outline-danger btn-sm" href="/logout">Logout</a></li>
+          {% endif %}
         </ul>
       </div>
     </div>
   </nav>
 
-  <!-- PAGE CONTENT -->
   <main class="container my-4">
     {% block content %}{% endblock %}
   </main>
 
-  <!-- Bootstrap JS -->
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-
   {% block scripts %}{% endblock %}
 </body>
 

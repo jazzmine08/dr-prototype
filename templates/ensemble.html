@@ -8,7 +8,6 @@
 </p>
 
 <style>
-    /* page-specific styles only (safe with base.html) */
     .rowx {
         display: flex;
         gap: 12px;
@@ -60,6 +59,23 @@
         font-family: Consolas, monospace;
         font-size: 13px;
     }
+
+    .kv {
+        display: grid;
+        grid-template-columns: 170px 1fr;
+        gap: 6px 10px;
+        font-size: 13px;
+        margin-top: 10px;
+    }
+
+    .kv div.k {
+        color: #6b7280;
+    }
+
+    .kv div.v {
+        color: #111827;
+        font-weight: 600;
+    }
 </style>
 
 <div class="gridx">
@@ -71,13 +87,27 @@
         <div class="mt-3">
             <label class="fw-bold">processed_dir</label>
             <input id="processedDir" class="form-control"
-                placeholder="G:\My Drive\dr_prototype\processed\aptos2019\processed_final\train" />
+                placeholder="X:\dr_prototype\processed\aptos2019\processed_final\train" />
             <div class="text-muted small mt-2">
-                Default: <code>G:\My Drive\dr_prototype\processed\{dataset}\processed_final\train</code>
+                Default: <code>X:\dr_prototype\processed\{dataset}\processed_final\train</code>
             </div>
         </div>
 
-        <div class="mt-3">
+        <hr class="my-3" />
+
+        <div class="mt-1">
+            <label class="fw-bold">Saved Ensemble Runs</label>
+            <select id="savedEnsSelect" class="form-select"></select>
+            <div class="rowx mt-2">
+                <button class="btn btn-outline-secondary" id="btnRefreshSavedEns">Refresh Saved</button>
+                <button class="btn btn-outline-primary" id="btnLoadSavedEns">Load Result</button>
+            </div>
+
+        </div>
+
+        <hr class="my-3" />
+
+        <div class="mt-1">
             <label class="fw-bold">Run 1 (DenseNet121)</label>
             <select id="run1" class="form-select"></select>
         </div>
@@ -93,27 +123,28 @@
         </div>
 
         <div class="mt-3">
-            <label class="fw-bold">Weighting Mode</label>
-            <select id="weightingMode" class="form-select">
-                <option value="by_qwk" selected>Auto (by QWK) - recommended</option>
-                <option value="by_valacc">Auto (by best val accuracy)</option>
-                <option value="equal">Equal weights</option>
-                <option value="manual">Manual (isi w1,w2,w3)</option>
+            <label class="fw-bold">Ensemble Mode</label>
+            <select id="modeSelect" class="form-select">
+                <option value="softvote_by_qwk" selected>Soft vote — weighted by QWK (recommended)</option>
+                <option value="softvote_by_valacc">Soft vote — weighted by best val acc</option>
+                <option value="softvote_equal">Soft vote — equal weights (mean)</option>
+                <option value="softvote_manual">Soft vote — manual weights (w1,w2,w3)</option>
+                <option value="hardvote_majority">Hard vote — majority</option>
             </select>
         </div>
 
         <div class="mt-3" style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
             <div>
                 <label class="fw-bold">w1</label>
-                <input id="w1" type="number" step="0.01" placeholder="0.33" class="form-control" />
+                <input id="w1" type="number" step="0.01" placeholder="0.33" class="form-control" disabled />
             </div>
             <div>
                 <label class="fw-bold">w2</label>
-                <input id="w2" type="number" step="0.01" placeholder="0.33" class="form-control" />
+                <input id="w2" type="number" step="0.01" placeholder="0.33" class="form-control" disabled />
             </div>
             <div>
                 <label class="fw-bold">w3</label>
-                <input id="w3" type="number" step="0.01" placeholder="0.34" class="form-control" />
+                <input id="w3" type="number" step="0.01" placeholder="0.34" class="form-control" disabled />
             </div>
         </div>
 
@@ -123,10 +154,10 @@
                 <input id="batchSize" type="number" min="1" value="16" class="form-control" />
             </div>
             <div>
-                <label class="fw-bold">Method</label>
-                <select id="methodSelect" class="form-select">
-                    <option value="softvote" selected>softvote</option>
-                    <option value="hardvote">hardvote</option>
+                <label class="fw-bold">Eval Split</label>
+                <select id="evalSplit" class="form-select">
+                    <option value="val" selected>val (recommended)</option>
+                    <option value="test">test</option>
                 </select>
             </div>
         </div>
@@ -146,8 +177,10 @@
 
     <!-- RIGHT: outputs -->
     <div class="card shadow-sm p-3">
-        <div class="fw-bold" style="font-size:16px;">Latest Ensemble Result</div>
+        <div class="fw-bold" style="font-size:16px;">Ensemble Result</div>
         <div class="text-muted" id="ensDir" style="margin-top:6px;"></div>
+
+        <div id="ensMetrics" class="kv"></div>
 
         <div class="mt-3">
             <div class="text-muted fw-bold mb-2">Confusion Matrix</div>
@@ -163,7 +196,6 @@
 {% endblock %}
 
 {% block scripts %}
-<!-- Socket.IO (optional) -->
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 
 <script>
@@ -179,13 +211,19 @@
     const btnRefreshRuns = document.getElementById("btnRefreshRuns");
     const btnStartEnsemble = document.getElementById("btnStartEnsemble");
 
+    const savedEnsSelect = document.getElementById("savedEnsSelect");
+    const btnRefreshSavedEns = document.getElementById("btnRefreshSavedEns");
+    const btnLoadSavedEns = document.getElementById("btnLoadSavedEns");
+
     const ensDir = document.getElementById("ensDir");
     const imgCM = document.getElementById("imgCM");
     const reportBox = document.getElementById("reportBox");
+    const ensMetrics = document.getElementById("ensMetrics");
 
     const batchSizeEl = document.getElementById("batchSize");
-    const weightingModeEl = document.getElementById("weightingMode");
-    const methodSelect = document.getElementById("methodSelect");
+    const evalSplitEl = document.getElementById("evalSplit");
+
+    const modeSelect = document.getElementById("modeSelect");
     const w1El = document.getElementById("w1");
     const w2El = document.getElementById("w2");
     const w3El = document.getElementById("w3");
@@ -198,32 +236,24 @@
         logBox.scrollTop = logBox.scrollHeight;
     }
 
-    function getProcessedDir(ds) {
-        const base = `G:\\My Drive\\dr_prototype\\processed\\${ds}\\processed_final\\train`;
-        const custom = (processedDirEl.value || "").trim();
-        return custom ? custom : base;
+    function setStatus(s) {
+        statusText.textContent = s;
     }
 
-    async function loadDatasets() {
-        const res = await fetch("/datasets");
-        const data = await res.json();
-        datasetSelect.innerHTML = "";
-        (data.datasets || []).forEach(ds => {
-            const opt = document.createElement("option");
-            opt.value = ds;
-            opt.textContent = (ds === "aptos2019") ? "APTOS 2019" : (ds === "drtid") ? "DRTiD" : ds;
-            datasetSelect.appendChild(opt);
-        });
-        if ([...datasetSelect.options].some(o => o.value === "aptos2019")) datasetSelect.value = "aptos2019";
-        addLog(`✅ Loaded datasets: ${(data.datasets || []).join(", ") || "(none)"}`);
-        processedDirEl.value = "";
+    function getDefaultProcessedDir(ds) {
+        return `X:\\dr_prototype\\processed\\${ds}\\processed_final\\train`;
+    }
+
+    function getProcessedDir(ds) {
+        const custom = (processedDirEl.value || "").trim();
+        return custom ? custom : getDefaultProcessedDir(ds);
     }
 
     function setOptions(selectEl, items) {
         selectEl.innerHTML = "";
         items.forEach(it => {
             const opt = document.createElement("option");
-            opt.value = it.run_id;
+            opt.value = it.value;
             opt.textContent = it.label;
             selectEl.appendChild(opt);
         });
@@ -231,141 +261,294 @@
 
     function pickPreferred(selectEl, keyword) {
         const opts = [...selectEl.options];
-        const found = opts.find(o => (o.value || "").includes(keyword));
+        const found = opts.find(o => (o.value || "").includes(keyword) || (o.textContent || "").includes(keyword));
         if (found) selectEl.value = found.value;
+    }
+
+    async function loadDatasets() {
+        try {
+            const res = await fetch("/api/datasets");
+            const data = await res.json();
+            datasetSelect.innerHTML = "";
+
+            (data.datasets || []).forEach(ds => {
+                const opt = document.createElement("option");
+                opt.value = ds;
+                opt.textContent = (ds === "aptos2019") ? "APTOS 2019" : (ds === "drtid") ? "DRTiD" : ds;
+                datasetSelect.appendChild(opt);
+            });
+
+            if ([...datasetSelect.options].some(o => o.value === "aptos2019")) datasetSelect.value = "aptos2019";
+            addLog(`✅ Loaded datasets: ${(data.datasets || []).join(", ") || "(none)"}`);
+        } catch (e) {
+            addLog("❌ Failed to load datasets. Check /api/datasets route.");
+        }
     }
 
     async function refreshRuns() {
         const ds = datasetSelect.value || "aptos2019";
-        addLog(`🔄 Loading runs for ${ds}...`);
+        addLog(`🔄 Loading base-model runs for ${ds}...`);
 
-        const res = await fetch(`/api/results/list_detailed?dataset=${encodeURIComponent(ds)}`);
-        const data = await res.json();
+        try {
+            const res = await fetch(`/api/results/list?dataset=${encodeURIComponent(ds)}`);
+            const data = await res.json();
 
-        const runs = (data.runs || []).map(r => ({
-            run_id: r.run_id,
-            label: `${r.run_id}  |  ${(r.model || r.model_name || "")}  |  ${(r.created_at || "")}`
-        }));
+            const items = data.items || [];
+            const runs = items.map(r => {
+                const model = (r.model || r.backbone || "");
+                const acc = (r.best_val_accuracy != null) ? `acc=${Number(r.best_val_accuracy).toFixed(4)}` : "";
+                const qwk = (r.kappa_qwk != null) ? `qwk=${Number(r.kappa_qwk).toFixed(4)}` : "";
+                const score = [acc, qwk].filter(Boolean).join(" | ");
+                return ({
+                    value: r.run_id,
+                    label: `${r.run_id}  |  ${model}${score ? "  |  " + score : ""}`
+                });
+            });
 
-        if (runs.length === 0) {
-            addLog("⚠️ No runs found. Train models first.");
-            setOptions(run1, []);
-            setOptions(run2, []);
-            setOptions(run3, []);
+            if (runs.length === 0) {
+                addLog("⚠️ No base runs found.");
+                setOptions(run1, []);
+                setOptions(run2, []);
+                setOptions(run3, []);
+                return;
+            }
+
+            setOptions(run1, runs);
+            setOptions(run2, runs);
+            setOptions(run3, runs);
+
+            pickPreferred(run1, "DenseNet121");
+            pickPreferred(run2, "InceptionResNetV2");
+            pickPreferred(run3, "EfficientNetV2B0");
+
+            addLog(`✅ Loaded ${runs.length} base run(s).`);
+        } catch (e) {
+            addLog("❌ Failed to load runs. Check /api/results/list route.");
+        }
+    }
+
+    async function refreshSavedEnsembles(selectLatest = true) {
+        const ds = datasetSelect.value || "aptos2019";
+        addLog(`🔄 Loading saved ensemble runs for ${ds}...`);
+        try {
+            const res = await fetch(`/api/ensemble/list?dataset=${encodeURIComponent(ds)}`);
+            const data = await res.json();
+
+            const runs = (data.runs || []).map(rid => ({
+                value: rid,
+                label: rid
+            }));
+
+            if (!runs.length) {
+                setOptions(savedEnsSelect, [{ value: "", label: "(no saved ensemble runs)" }]);
+                addLog("ℹ️ No saved ensemble runs yet.");
+                return;
+            }
+
+            setOptions(savedEnsSelect, runs);
+            if (selectLatest) savedEnsSelect.value = runs[0].value; // newest first (backend sorts reverse)
+            addLog(`✅ Loaded ${runs.length} saved ensemble run(s).`);
+        } catch (e) {
+            addLog("❌ Failed to load saved ensembles. Check /api/ensemble/list route.");
+        }
+    }
+
+    function renderMetrics(metricsObj) {
+        const m = metricsObj || {};
+        // try a few common shapes
+        const qwk = m.kappa_qwk ?? (m.summary?.kappa_qwk);
+        const acc = m.eval_accuracy ?? m.accuracy ?? (m.summary?.accuracy);
+        const bva = m.best_val_accuracy ?? (m.summary?.best_val_accuracy);
+        const bvl = m.best_val_loss ?? (m.summary?.best_val_loss);
+
+        const rows = [
+            ["Eval Accuracy", (acc != null ? Number(acc).toFixed(4) : "-")],
+            ["QWK (Kappa)", (qwk != null ? Number(qwk).toFixed(4) : "-")],
+            ["Best Val Acc", (bva != null ? Number(bva).toFixed(4) : "-")],
+            ["Best Val Loss", (bvl != null ? Number(bvl).toFixed(4) : "-")],
+        ];
+
+        ensMetrics.innerHTML = rows.map(([k, v]) => `
+            <div class="k">${k}</div><div class="v">${v}</div>
+        `).join("");
+    }
+
+    async function loadSavedEnsemble(runId) {
+        const ds = datasetSelect.value || "aptos2019";
+        if (!runId) {
+            addLog("⚠️ No saved run selected.");
             return;
         }
 
-        setOptions(run1, runs);
-        setOptions(run2, runs);
-        setOptions(run3, runs);
+        addLog(`📥 Loading saved ensemble: ${runId}`);
+        try {
+            const res = await fetch(`/api/ensemble/get?dataset=${encodeURIComponent(ds)}&run_id=${encodeURIComponent(runId)}`);
+            const data = await res.json();
 
-        pickPreferred(run1, "DenseNet121");
-        pickPreferred(run2, "InceptionResNetV2");
-        pickPreferred(run3, "EfficientNetV2B0");
+            if (data.status !== "ok") {
+                addLog("❌ Failed to load ensemble: " + (data.message || "unknown"));
+                return;
+            }
 
-        addLog(`✅ Loaded ${runs.length} run(s) for ${ds}.`);
+            ensDir.textContent = data.run_dir || "";
+            reportBox.textContent = data.report || "(no report)";
+            imgCM.src = data.images?.["confusion_matrix.png"] || "";
+            renderMetrics(data.metrics || {});
+            addLog("✅ Loaded saved ensemble result.");
+        } catch (e) {
+            addLog("❌ Error loading saved ensemble: " + (e?.message || e));
+        }
     }
 
     btnRefreshRuns.addEventListener("click", refreshRuns);
-    datasetSelect.addEventListener("change", () => {
+    btnRefreshSavedEns.addEventListener("click", () => refreshSavedEnsembles(false));
+    btnLoadSavedEns.addEventListener("click", () => loadSavedEnsemble(savedEnsSelect.value));
+
+    datasetSelect.addEventListener("change", async () => {
         processedDirEl.value = "";
-        refreshRuns();
+        await refreshRuns();
+        await refreshSavedEnsembles(true);
     });
 
-    weightingModeEl.addEventListener("change", () => {
-        const isManual = (weightingModeEl.value === "manual");
-        w1El.disabled = !isManual;
-        w2El.disabled = !isManual;
-        w3El.disabled = !isManual;
-        if (!isManual) {
+    function setManualWeightsEnabled(enabled) {
+        w1El.disabled = !enabled;
+        w2El.disabled = !enabled;
+        w3El.disabled = !enabled;
+        if (!enabled) {
             w1El.value = "";
             w2El.value = "";
             w3El.value = "";
         }
-    });
-    weightingModeEl.dispatchEvent(new Event("change"));
+    }
+
+    function refreshWeightUI() {
+        const mode = modeSelect.value || "softvote_by_qwk";
+        setManualWeightsEnabled(mode === "softvote_manual");
+    }
+
+    modeSelect.addEventListener("change", refreshWeightUI);
+    refreshWeightUI();
 
     btnStartEnsemble.addEventListener("click", async () => {
-        const ds = datasetSelect.value || "aptos2019";
-        if (!run1.value || !run2.value || !run3.value) {
-            addLog("❌ Please select 3 runs (DenseNet121, InceptionResNetV2, EfficientNetV2B0).");
-            return;
+        try {
+            const ds = datasetSelect.value || "aptos2019";
+            if (!run1.value || !run2.value || !run3.value) {
+                addLog("❌ Please select 3 runs first.");
+                return;
+            }
+
+            const mode = modeSelect.value || "softvote_by_qwk";
+
+            // Map UI -> backend-friendly payload
+            let method = "softvote";
+            let weighting = "by_qwk";
+            let weights = null;
+
+            if (mode === "softvote_by_qwk") {
+                method = "softvote";
+                weighting = "by_qwk";
+            } else if (mode === "softvote_by_valacc") {
+                method = "softvote";
+                weighting = "by_valacc";
+            } else if (mode === "softvote_equal") {
+                method = "softvote";
+                weighting = "equal";
+            } else if (mode === "softvote_manual") {
+                method = "softvote";
+                weighting = "manual";
+                const w1 = Number(w1El.value || 0);
+                const w2 = Number(w2El.value || 0);
+                const w3 = Number(w3El.value || 0);
+                if (!(w1 > 0 || w2 > 0 || w3 > 0)) {
+                    addLog("❌ Manual weights selected but w1/w2/w3 are empty.");
+                    return;
+                }
+                weights = [w1, w2, w3];
+            } else if (mode === "hardvote_majority") {
+                method = "hardvote";
+                weighting = "equal";
+            }
+
+            const payload = {
+                dataset: ds,
+                processed_dir: getProcessedDir(ds),
+                run_ids: [run1.value, run2.value, run3.value],
+                method: method,
+                weighting: weighting,
+                weights: weights || undefined,
+                batch_size: Number(batchSizeEl.value || 16),
+                img_size: 224,
+                seed: 123,
+                cache_dataset: false,
+                eval_split: (evalSplitEl.value || "val")
+            };
+
+            setStatus("running...");
+            btnStartEnsemble.disabled = true;
+
+            addLog(`▶️ Start ensemble for ${ds}`);
+            addLog(`⚙️ method=${payload.method}, weighting=${payload.weighting}${weights ? ", weights=" + weights.join(",") : ""}, eval_split=${payload.eval_split}`);
+
+            const resp = await fetch("/api/start_ensemble", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+
+            const out = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                setStatus("error");
+                addLog("❌ Start failed: " + (out.message || `HTTP ${resp.status}`));
+                return;
+            }
+
+            addLog(out.message || "Ensemble started");
+
+        } catch (e) {
+            setStatus("error");
+            addLog("❌ JS error on start: " + (e?.message || e));
+        } finally {
+            btnStartEnsemble.disabled = false;
         }
-
-        const payload = {
-            dataset: ds,
-            processed_dir: getProcessedDir(ds),
-            run_ids: [run1.value, run2.value, run3.value],
-            method: methodSelect.value || "softvote",
-            batch_size: Number(batchSizeEl.value || 16),
-            cache_dataset: false
-        };
-
-        const wm = weightingModeEl.value || "by_qwk";
-        if (wm === "manual") {
-            payload.weights = [
-                Number(w1El.value || 0),
-                Number(w2El.value || 0),
-                Number(w3El.value || 0)
-            ];
-        } else {
-            payload.weighting = wm;
-        }
-
-        statusText.textContent = "running...";
-        addLog(`▶️ Start ensemble for ${ds}`);
-        addLog(`📁 processed_dir = ${payload.processed_dir}`);
-        addLog(`🧠 run_ids = ${payload.run_ids.join(", ")}`);
-        addLog(`⚙️ method=${payload.method}, weighting=${payload.weighting || "manual"}`);
-
-        const resp = await fetch("/start_ensemble", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-        });
-
-        const out = await resp.json().catch(() => ({}));
-        addLog(out.message || "Ensemble started");
     });
 
     if (socket) {
         socket.on("ensemble_log", (d) => addLog(d.message || JSON.stringify(d)));
 
         socket.on("ensemble_error", (d) => {
-            statusText.textContent = "error";
+            setStatus("error");
             addLog("❌ " + (d.message || JSON.stringify(d)));
         });
 
         socket.on("ensemble_done", async (d) => {
-            statusText.textContent = "done";
+            setStatus("done");
             addLog("✅ Ensemble done");
 
             const summary = d.summary || {};
             const runDir = d.run_dir || summary?.run_dir || "";
             ensDir.textContent = runDir;
 
-            try {
-                const ds = datasetSelect.value || "aptos2019";
-                const runId = (runDir || "").split("\\").pop().split("/").pop();
-                const detRes = await fetch(`/api/ensemble/get?dataset=${encodeURIComponent(ds)}&run_id=${encodeURIComponent(runId)}`);
-                const det = await detRes.json();
-                if (det.status === "ok") {
-                    if (det.images?.["confusion_matrix.png"]) imgCM.src = det.images["confusion_matrix.png"];
-                    reportBox.textContent = det.report || "(no report)";
-                } else {
-                    reportBox.textContent = "(Saved to folder, but API could not load details.)";
-                }
-            } catch (e) {
-                reportBox.textContent = "(Saved to folder. Could not load via API.)";
+            // After finish: refresh saved list and auto-load latest
+            await refreshSavedEnsembles(true);
+            const latest = savedEnsSelect.value;
+            if (latest) {
+                await loadSavedEnsemble(latest);
             }
         });
     } else {
-        addLog("⚠️ Socket.IO not loaded. Page still works, but realtime logs may not appear.");
+        addLog("⚠️ Socket.IO not loaded. Realtime logs may not appear.");
     }
 
     (async function init() {
         await loadDatasets();
         await refreshRuns();
+        await refreshSavedEnsembles(true);
+
+        // optional: auto-load latest saved ensemble on first open
+        const latest = savedEnsSelect.value;
+        if (latest && latest !== "(no saved ensemble runs)") {
+            await loadSavedEnsemble(latest);
+        }
     })();
 </script>
 {% endblock %}

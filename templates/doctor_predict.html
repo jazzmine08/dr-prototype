@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block title %}Doctor - Clinical Prediction{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2><i class="bi bi-stethoscope"></i> Clinical Diagnostic Portal</h2>
+        <span class="badge bg-info text-dark">Doctor Access Mode</span>
+    </div>
+    <hr>
+
+    <div class="row">
+        <div class="col-md-5">
+            <div class="card shadow-sm border-0">
+                <div class="card-header bg-primary text-white">
+                    <h5 class="card-title mb-0">Patient Image Upload</h5>
+                </div>
+                <div class="card-body p-4">
+                    <p class="text-muted small">Upload a high-resolution fundus image for DR screening.</p>
+                    <form id="doctorPredictForm">
+                        <div class="mb-4">
+                            <label class="form-label fw-bold">Select Retinal Image</label>
+                            <input type="file" class="form-control" id="imageInput" accept="image/*" required>
+                        </div>
+                        <button type="submit" id="btnRun" class="btn btn-primary w-100 py-2 fw-bold">
+                            <i class="bi bi-cpu"></i> RUN ANALYSIS
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <div id="imagePreviewContainer" class="mt-4 d-none">
+                <div class="card border-0 shadow-sm">
+                    <div class="card-body text-center p-2 bg-dark rounded">
+                        <p class="small fw-bold text-light">Uploaded Patient Image:</p>
+                        <img id="patientImagePreview" src="" class="img-fluid rounded"
+                            style="height: 350px; width: 100%; object-fit: contain;">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-7">
+            <div id="loading" class="text-center d-none my-5">
+                <div class="spinner-border text-primary" role="status" style="width: 3rem; height: 3rem;"></div>
+                <p class="mt-3">Analyzing image with Ensemble AI...</p>
+            </div>
+
+            <div id="resultArea" class="card shadow-sm d-none border-0">
+                <div class="card-header bg-success text-white">
+                    <h5 class="card-title mb-0">Diagnostic Assessment</h5>
+                </div>
+                <div class="card-body text-center p-5">
+                    <h4 class="text-muted mb-2">Final Prediction:</h4>
+                    <div class="display-1 fw-bold text-primary mb-3" id="finalResult">-</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    document.getElementById('doctorPredictForm').onsubmit = async (e) => {
+        e.preventDefault();
+
+        const fileInput = document.getElementById('imageInput');
+        const btn = document.getElementById('btnRun');
+        const loading = document.getElementById('loading');
+        const resultArea = document.getElementById('resultArea');
+        const finalResult = document.getElementById('finalResult');
+        const previewContainer = document.getElementById('imagePreviewContainer');
+        const previewImg = document.getElementById('patientImagePreview');
+
+        if (!fileInput.files[0]) return;
+
+        // Preview the image with proper aspect ratio
+        previewImg.src = URL.createObjectURL(fileInput.files[0]);
+        previewContainer.classList.remove('d-none');
+
+        // UI State: Loading
+        btn.disabled = true;
+        loading.classList.remove('d-none');
+        resultArea.classList.add('d-none');
+
+        const formData = new FormData();
+        formData.append('image', fileInput.files[0]);
+
+        try {
+            const response = await fetch('/api/predict', {
+                method: 'POST',
+                body: formData
+            });
+            const data = await response.json();
+
+            if (data.status === 'ok') {
+                finalResult.innerText = data.ensemble.pred_label;
+
+                // Color logic based on severity index
+                if (data.ensemble.pred_class_index === 0) {
+                    finalResult.className = "display-1 fw-bold text-success mb-3";
+                } else if (data.ensemble.pred_class_index >= 3) {
+                    finalResult.className = "display-1 fw-bold text-danger mb-3";
+                } else {
+                    finalResult.className = "display-1 fw-bold text-warning mb-3";
+                }
+
+                resultArea.classList.remove('d-none');
+            } else {
+                alert("Analysis failed: " + data.message);
+            }
+        } catch (err) {
+            console.error(err);
+            alert("Server error during analysis.");
+        } finally {
+            btn.disabled = false;
+            loading.classList.add('d-none');
+        }
+    };
+</script>
+{% endblock %}

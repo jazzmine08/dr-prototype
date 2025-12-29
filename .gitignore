@@ -5,3 +5,7 @@ venv/
 .venv_tf/
 venv_tf/
 models/
+dataset/
+.dataset/
+processed/
+.processed/

@@ -17,6 +17,15 @@
             </select>
         </div>
 
+        <!-- Admin-only controls (auto hidden if role != admin) -->
+        <div class="col-auto" id="adminControls" style="display:none;">
+            <select id="weightingSelect" class="form-select">
+                <option value="equal" selected>Ensemble Weighting: equal</option>
+                <option value="by_qwk">Ensemble Weighting: by QWK</option>
+                <option value="by_valacc">Ensemble Weighting: by Val Acc</option>
+            </select>
+        </div>
+
         <div class="col-auto">
             <button id="btnPredict" class="btn btn-primary">Predict</button>
         </div>
@@ -44,8 +53,11 @@
 </div>
 
 <div class="card shadow-sm p-3 mt-3">
-    <h5 class="fw-bold">Predictions</h5>
-    <div id="resultBlock" class="text-muted">No prediction yet.</div>
+    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+        <h5 class="fw-bold mb-0">Predictions</h5>
+        <div class="text-muted" style="font-size:13px;" id="metaLine"></div>
+    </div>
+    <div id="resultBlock" class="text-muted mt-2">No prediction yet.</div>
 </div>
 
 <pre id="logBox" class="bg-dark text-light p-3 mt-3" style="height:180px; overflow:auto;"></pre>
@@ -60,6 +72,11 @@
     const procImg = document.getElementById("procImg");
     const resultBlock = document.getElementById("resultBlock");
     const logBox = document.getElementById("logBox");
+    const metaLine = document.getElementById("metaLine");
+
+    // admin UI
+    const adminControls = document.getElementById("adminControls");
+    const weightingSelect = document.getElementById("weightingSelect");
 
     let currentObjectUrl = null;
 
@@ -79,58 +96,127 @@
         procImg.src = b64.startsWith("data:") ? b64 : ("data:image/png;base64," + b64);
     }
 
+    function fmtProbList(probs) {
+        if (!Array.isArray(probs) || probs.length === 0) return "-";
+        // show as percentages
+        return probs.map((p, i) => `${i}:${(Number(p) * 100).toFixed(2)}%`).join(" | ");
+    }
+
+    function toTitle(s) {
+        return String(s ?? "").replace(/_/g, " ");
+    }
+
+    function normalizeResponse(data) {
+        // data.role is provided by backend; fallback to "user"
+        const role = (data?.role || "user").toLowerCase();
+        const isAdmin = role === "admin";
+        return { role, isAdmin };
+    }
+
+    function renderAdminModelTable(perModel, usedRuns) {
+        const order = ["DenseNet121", "InceptionResNetV2", "EfficientNetV2B0"];
+        const keys = order.filter(k => perModel && perModel[k]).concat(
+            Object.keys(perModel || {}).filter(k => !order.includes(k))
+        );
+
+        if (!keys.length) return "";
+
+        return `
+      <div class="table-responsive mt-3">
+        <table class="table table-sm table-bordered align-middle">
+          <thead class="table-light">
+            <tr>
+              <th style="width: 20%;">Model</th>
+              <th style="width: 20%;">Prediction</th>
+              <th style="width: 40%;">Probabilities (class: %)</th>
+              <th style="width: 20%;">Run Used</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${keys.map(modelName => {
+            const m = perModel[modelName] || {};
+            const pred = m.pred_label ?? "-";
+            const probs = fmtProbList(m.probs);
+            const run = usedRuns?.[modelName] ?? "-";
+            return `
+                <tr>
+                  <td>${esc(modelName)}</td>
+                  <td><b>${esc(pred)}</b></td>
+                  <td style="font-family:Consolas,monospace; font-size:12px;">${esc(probs)}</td>
+                  <td style="font-family:Consolas,monospace; font-size:12px;">${esc(run)}</td>
+                </tr>
+              `;
+        }).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+    }
+
+    function renderEnsembleBlock(ensemble, usedRuns) {
+        if (!ensemble) return "";
+
+        const method = ensemble.method || "ensemble";
+        const pred = ensemble.pred_label || "-";
+        const probs = fmtProbList(ensemble.probs);
+        const weights = ensemble.weights ? Object.entries(ensemble.weights)
+            .map(([k, v]) => `${k}:${(Number(v) * 100).toFixed(1)}%`)
+            .join(" | ")
+            : "-";
+
+        return `
+      <div class="table-responsive">
+        <table class="table table-sm table-bordered align-middle">
+          <thead class="table-light">
+            <tr>
+              <th style="width: 20%;">Type</th>
+              <th style="width: 20%;">Prediction</th>
+              <th style="width: 40%;">Probabilities (class: %)</th>
+              <th style="width: 20%;">Weights</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>${esc(toTitle(method))}</td>
+              <td><b>${esc(pred)}</b></td>
+              <td style="font-family:Consolas,monospace; font-size:12px;">${esc(probs)}</td>
+              <td style="font-family:Consolas,monospace; font-size:12px;">${esc(weights)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    `;
+    }
+
     function renderResults(data) {
-        const baseModels = Array.isArray(data?.results) ? data.results
-            : (Array.isArray(data?.models) ? data.models : []);
+        const { isAdmin } = normalizeResponse(data);
 
         if (data?.preprocessed_preview_b64) {
             setProcessedPreview(data.preprocessed_preview_b64);
         }
 
-        const rows = baseModels.map(m => {
-            if (!m || m.status !== "ok") {
-                return {
-                    model: m?.model || "Unknown",
-                    pred_label: m?.message ? `Error: ${m.message}` : "Error"
-                };
-            }
-            return {
-                model: m.model || "Model",
-                pred_label: m.pred_label || "-"
-            };
-        });
+        // top meta line
+        const ds = data?.dataset || "-";
+        const role = data?.role || "-";
+        metaLine.textContent = `dataset=${ds} | role=${role}`;
 
-        if (data?.ensemble) {
-            rows.push({
-                model: "Ensemble",
-                pred_label: data.ensemble.pred_label || "-"
-            });
+        const ensembleHtml = renderEnsembleBlock(data?.ensemble, data?.used_runs);
+
+        // Admin sees per-model + ensemble
+        let adminHtml = "";
+        if (isAdmin) {
+            adminHtml = renderAdminModelTable(data?.per_model, data?.used_runs);
         }
 
-        if (!rows.length) {
-            resultBlock.innerHTML = `<div class="text-danger">No model results returned by server.</div>`;
+        // Non-admin only sees ensemble (and if missing, show error message)
+        if (!ensembleHtml) {
+            resultBlock.innerHTML = `<div class="text-danger">No ensemble result returned by server.</div>`;
             return;
         }
 
         resultBlock.innerHTML = `
-      <div class="table-responsive">
-        <table class="table table-sm table-bordered align-middle">
-          <thead>
-            <tr>
-              <th style="width: 40%;">Model</th>
-              <th>Prediction</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows.map(r => `
-              <tr>
-                <td>${esc(r.model)}</td>
-                <td><b>${esc(r.pred_label)}</b></td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      </div>
+      ${ensembleHtml}
+      ${adminHtml}
     `;
     }
 
@@ -138,12 +224,12 @@
         const f = fileInput.files?.[0];
         if (!f) return;
 
-        // cleanup old preview url
         if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
         currentObjectUrl = URL.createObjectURL(f);
 
         origImg.src = currentObjectUrl;
         procImg.src = "";
+        metaLine.textContent = "";
         resultBlock.textContent = "Ready. Click Predict.";
         logBox.textContent = "";
     });
@@ -157,12 +243,18 @@
 
         btnPredict.disabled = true;
         resultBlock.textContent = "Predicting...";
+        metaLine.textContent = "";
         logBox.textContent = "";
         log("Starting prediction...");
 
         const fd = new FormData();
         fd.append("image", f);
         fd.append("dataset", datasetSelect.value);
+
+        // Admin can request weighting; server will ignore for non-admin anyway
+        if (weightingSelect && adminControls && adminControls.style.display !== "none") {
+            fd.append("weighting", weightingSelect.value);
+        }
 
         try {
             const resp = await fetch("/api/predict", { method: "POST", body: fd });
@@ -172,12 +264,16 @@
             try {
                 data = JSON.parse(text);
             } catch (err) {
-                throw new Error(`Server did not return JSON (HTTP ${resp.status}). First 120 chars: ${text.slice(0, 120)}`);
+                throw new Error(`Server did not return JSON (HTTP ${resp.status}). First 160 chars: ${text.slice(0, 160)}`);
             }
 
             if (!resp.ok) {
                 throw new Error(data?.message || `Request failed (HTTP ${resp.status})`);
             }
+
+            // Show/hide admin controls based on returned role (first successful call)
+            const { isAdmin } = normalizeResponse(data);
+            adminControls.style.display = isAdmin ? "" : "none";
 
             log("Done.");
             renderResults(data);
@@ -189,5 +285,8 @@
             btnPredict.disabled = false;
         }
     });
+
+    // On page load, keep admin controls hidden; they will appear after a successful admin predict.
+    adminControls.style.display = "none";
 </script>
 {% endblock %}

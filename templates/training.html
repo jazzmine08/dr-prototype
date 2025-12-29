@@ -41,7 +41,6 @@
     font-weight: 800;
   }
 
-  /* Make inputs look consistent even if base uses Bootstrap */
   select,
   input {
     width: 100%;
@@ -111,6 +110,7 @@
     <button class="btn btn-outline-secondary" id="btnClear">Clear Log</button>
     <div class="status" id="statusText">Status: idle</div>
   </div>
+
 </div>
 
 <div class="card shadow-sm p-3 mt-3">
@@ -120,14 +120,20 @@
 {% endblock %}
 
 {% block scripts %}
-<!-- Socket.IO (optional). Kalau CDN gagal, halaman tetap jalan. -->
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 
 <script>
-  // --- helpers ---
+  // --- DOM ---
   const logBox = document.getElementById("logBox");
   const statusText = document.getElementById("statusText");
+  const datasetSelect = document.getElementById("datasetSelect");
+  const trainMode = document.getElementById("trainMode");
+  const singleModelWrap = document.getElementById("singleModelWrap");
+  const modelName = document.getElementById("modelName");
+  const btnStart = document.getElementById("btnStart");
+  const btnClear = document.getElementById("btnClear");
 
+  // --- helpers ---
   function addLog(msg) {
     const ts = new Date().toLocaleTimeString();
     logBox.innerHTML += `[${ts}] ${msg}<br/>`;
@@ -138,34 +144,51 @@
     statusText.textContent = "Status: " + s;
   }
 
-  // --- Socket.IO optional (biar JS gak crash kalau CDN gagal) ---
-  const socket = (window.io) ? io() : null;
+  function niceDatasetLabel(ds) {
+    if (ds === "aptos2019") return "APTOS 2019";
+    if (ds === "drtid") return "DRTiD";
+    return ds;
+  }
+
+  // Safe JSON fetch helper: avoids "Unexpected token '<'"
+  async function fetchJson(url, opts) {
+    const res = await fetch(url, opts);
+    const text = await res.text();
+
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch (e) {
+      throw new Error(`Non-JSON response from ${url} (HTTP ${res.status}): ${text.slice(0, 160)}`);
+    }
+
+    if (!res.ok) {
+      const msg = (data && (data.message || data.error)) ? (data.message || data.error) : `HTTP ${res.status}`;
+      throw new Error(`${(opts && opts.method) ? opts.method : "GET"} ${url} failed (${res.status}) - ${msg}`);
+    }
+    return data;
+  }
+
+  // --- Socket.IO optional ---
+  const socket = (window.io) ? io(window.location.origin) : null;
   if (!socket) {
     addLog("⚠️ Socket.IO not loaded. Page will still work, but realtime logs may not appear.");
   }
 
-  // --- DOM elements ---
-  const datasetSelect = document.getElementById("datasetSelect");
-  const trainMode = document.getElementById("trainMode");
-  const singleModelWrap = document.getElementById("singleModelWrap");
-  const modelName = document.getElementById("modelName");
-  const btnStart = document.getElementById("btnStart");
-  const btnClear = document.getElementById("btnClear");
-
-  // --- load datasets ---
+  // --- load datasets (UPDATED: /api/datasets) ---
   async function loadDatasets() {
-    try {
-      const res = await fetch("/datasets");
-      if (!res.ok) throw new Error(`GET /datasets failed (${res.status})`);
-      const data = await res.json();
+    datasetSelect.innerHTML = "";
 
-      datasetSelect.innerHTML = "";
-      (data.datasets || []).forEach(ds => {
+    try {
+      const data = await fetchJson("/api/datasets");
+      const datasets = (data && data.datasets) ? data.datasets : [];
+
+      if (!datasets.length) throw new Error("No datasets returned.");
+
+      datasets.forEach(ds => {
         const opt = document.createElement("option");
         opt.value = ds;
-        opt.textContent = (ds === "aptos2019") ? "APTOS 2019"
-          : (ds === "drtid") ? "DRTiD"
-            : ds;
+        opt.textContent = niceDatasetLabel(ds);
         datasetSelect.appendChild(opt);
       });
 
@@ -175,10 +198,20 @@
         datasetSelect.value = datasetSelect.options[0].value;
       }
 
-      addLog(`✅ Loaded datasets: ${(data.datasets || []).join(", ") || "(none)"}`);
+      addLog(`✅ Loaded datasets: ${datasets.join(", ")}`);
+      setStatus("idle");
     } catch (err) {
-      addLog("❌ Failed to load datasets: " + err.message);
-      setStatus("error");
+      // fallback so page is usable even if API fails
+      ["aptos2019", "drtid"].forEach(ds => {
+        const opt = document.createElement("option");
+        opt.value = ds;
+        opt.textContent = niceDatasetLabel(ds);
+        datasetSelect.appendChild(opt);
+      });
+      datasetSelect.value = "aptos2019";
+
+      addLog(`⚠️ /api/datasets failed, using fallback options: aptos2019, drtid (${err.message})`);
+      setStatus("warning");
     }
   }
 
@@ -194,7 +227,7 @@
     addLog("🧹 Log cleared.");
   });
 
-  // --- start training ---
+  // --- start training (UPDATED: /api/start_training) ---
   btnStart.addEventListener("click", async () => {
     try {
       const ds = datasetSelect.value || "aptos2019";
@@ -210,65 +243,62 @@
         dropout: Number(document.getElementById("dropout").value || 0.3),
       };
 
-      // OPTIONAL: kalau kamu nanti tambahin <input id="limit"> baru akan kepake
-      const limitEl = document.getElementById("limit");
-      if (limitEl && Number(limitEl.value) > 0) payload.limit = Number(limitEl.value);
-
       if (trainMode.value === "single") {
-        payload.model = modelName.value;
+        payload.model = modelName.value; // your backend may ignore it; safe to send
       }
 
       setStatus(`starting training (${ds})...`);
       addLog(`▶️ Training request: dataset=${ds}, mode=${trainMode.value}${trainMode.value === "single" ? ", model=" + modelName.value : ""}`);
+      btnStart.disabled = true;
 
-      const resp = await fetch("/start_training", {
+      const out = await fetchJson("/api/start_training", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
 
-      if (!resp.ok) {
-        const txt = await resp.text().catch(() => "");
-        throw new Error(`POST /start_training failed (${resp.status}). ${txt}`);
-      }
-
-      const out = await resp.json();
-
       if (out.status === "ok") {
         setStatus(`running (${ds})`);
         addLog(`✅ ${out.message || "Training started."}`);
-        if (out.processed_dir) addLog(`📁 processed_dir used: ${out.processed_dir}`);
       } else {
         setStatus("error");
         addLog(`❌ ${out.message || "Unknown error"}`);
+        btnStart.disabled = false;
       }
     } catch (err) {
       setStatus("error");
       addLog("❌ " + err.message);
+      btnStart.disabled = false;
     }
   });
 
   // --- Socket listeners (optional) ---
   if (socket) {
-    const logEvents = ["train_log", "training_log", "log", "message"];
-    const errEvents = ["train_error", "training_error", "error"];
-    const doneEvents = ["train_done", "training_done", "done"];
+    socket.on("connect", () => addLog("🔌 Socket connected."));
+    socket.on("disconnect", () => addLog("⚠️ Socket disconnected."));
+
+    // These event names should match what your trainer emits
+    const logEvents = ["train_log", "training_log"];
+    const errEvents = ["train_error", "training_error"];
+    const doneEvents = ["train_done", "training_done"];
 
     logEvents.forEach(ev => socket.on(ev, (data) => {
-      const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : JSON.stringify(data);
-      addLog(msg);
+      const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : "";
+      if (msg) addLog(msg);
     }));
 
     errEvents.forEach(ev => socket.on(ev, (data) => {
-      const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : JSON.stringify(data);
+      const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : "error";
       addLog("❌ " + msg);
       setStatus("error");
+      btnStart.disabled = false;
     }));
 
     doneEvents.forEach(ev => socket.on(ev, (data) => {
-      const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : JSON.stringify(data);
+      const msg = (data && (data.message || data.msg)) ? (data.message || data.msg) : "done";
       addLog("✅ " + msg);
       setStatus("done");
+      btnStart.disabled = false;
     }));
   }
 

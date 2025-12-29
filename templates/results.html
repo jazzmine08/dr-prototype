@@ -8,7 +8,6 @@
 </p>
 
 <style>
-    /* page-only styles (safe with base.html) */
     .gridx {
         display: grid;
         grid-template-columns: 340px 1fr;
@@ -223,92 +222,164 @@
         return isNaN(n) ? String(x) : n.toFixed(4);
     }
 
+    // Try multiple endpoints for datasets (some apps expose /datasets, some /api/datasets)
     async function loadDatasets() {
-        const res = await fetch("/datasets");
-        const data = await res.json();
+        const endpoints = ["/api/datasets", "/datasets"];
+        let data = null;
+
+        for (const url of endpoints) {
+            try {
+                const res = await fetch(url);
+                if (!res.ok) continue;
+                data = await res.json();
+                if (data) break;
+            } catch (e) { }
+        }
+
         datasetSelect.innerHTML = "";
-        (data.datasets || []).forEach(ds => {
+        const dsList = (data && data.datasets) ? data.datasets : [];
+
+        if (!dsList.length) {
+            const opt = document.createElement("option");
+            opt.value = "";
+            opt.textContent = "(no datasets)";
+            datasetSelect.appendChild(opt);
+            return;
+        }
+
+        dsList.forEach(ds => {
             const opt = document.createElement("option");
             opt.value = ds;
             opt.textContent = (ds === "aptos2019") ? "APTOS 2019" : (ds === "drtid") ? "DRTiD" : ds;
             datasetSelect.appendChild(opt);
         });
+
         if ([...datasetSelect.options].some(o => o.value === "aptos2019")) {
             datasetSelect.value = "aptos2019";
         }
     }
 
+    // Handle different list shapes from backend
+    function extractRunIds(data) {
+        if (!data) return [];
+
+        // {status:"ok", runs:[...]}
+        if (Array.isArray(data.runs)) return data.runs;
+
+        // {status:"ok", items:[{run_id:...}, ...]}
+        if (Array.isArray(data.items)) return data.items.map(x => x.run_id).filter(Boolean);
+
+        return [];
+    }
+
     async function refreshRuns() {
         const ds = datasetSelect.value || "aptos2019";
         runsList.innerHTML = "<div class='text-muted'>Loading runs...</div>";
+        runCount.textContent = "";
 
-        const res = await fetch(`/api/results/list?dataset=${encodeURIComponent(ds)}`);
-        const data = await res.json();
+        try {
+            const res = await fetch(`/api/results/list?dataset=${encodeURIComponent(ds)}`);
+            const data = await res.json();
 
-        if (data.status !== "ok") {
-            runsList.innerHTML = `<div class='text-muted'>❌ ${data.message || "Failed to load runs"}</div>`;
-            clearDetails();
-            return;
-        }
+            if (data.status && data.status !== "ok") {
+                runsList.innerHTML = `<div class='text-muted'>❌ ${data.message || "Failed to load runs"}</div>`;
+                clearDetails();
+                return;
+            }
 
-        const runs = data.runs || [];
-        runCount.textContent = `${runs.length} run(s)`;
+            const runIds = extractRunIds(data);
+            runCount.textContent = `${runIds.length} run(s)`;
 
-        if (runs.length === 0) {
-            runsList.innerHTML = "<div class='text-muted'>No runs yet. Train a model first.</div>";
-            clearDetails();
-            return;
-        }
+            if (runIds.length === 0) {
+                runsList.innerHTML = "<div class='text-muted'>No runs yet. Train a model first.</div>";
+                clearDetails();
+                return;
+            }
 
-        runsList.innerHTML = "";
-        runs.forEach(runId => {
-            const item = document.createElement("div");
-            item.className = "run-item";
-            item.innerHTML = `
-        <div class="run-title">${runId}</div>
-        <div class="run-sub">Click to view details</div>
-      `;
-            item.addEventListener("click", async () => {
-                [...document.querySelectorAll(".run-item")].forEach(x => x.classList.remove("active"));
-                item.classList.add("active");
-                await loadRunDetails(ds, runId);
+            runsList.innerHTML = "";
+            runIds.forEach(runId => {
+                const item = document.createElement("div");
+                item.className = "run-item";
+                item.innerHTML = `
+                    <div class="run-title">${runId}</div>
+                    <div class="run-sub">Click to view details</div>
+                `;
+                item.addEventListener("click", async () => {
+                    [...document.querySelectorAll(".run-item")].forEach(x => x.classList.remove("active"));
+                    item.classList.add("active");
+                    await loadRunDetails(ds, runId);
+                });
+                runsList.appendChild(item);
             });
-            runsList.appendChild(item);
-        });
 
-        const first = runsList.querySelector(".run-item");
-        if (first) first.click();
+            const first = runsList.querySelector(".run-item");
+            if (first) first.click();
+        } catch (e) {
+            runsList.innerHTML = "<div class='text-muted'>❌ Failed to load runs (network/API error)</div>";
+            clearDetails();
+        }
+    }
+
+    // ✅ Robust: metrics may be flat OR nested under summary
+    function pickMetrics(obj) {
+        if (!obj) return {};
+        if (obj.kappa_qwk !== undefined || obj.best_val_accuracy !== undefined || obj.best_val_loss !== undefined) {
+            return obj; // flat
+        }
+        if (obj.summary && (obj.summary.kappa_qwk !== undefined || obj.summary.best_val_accuracy !== undefined || obj.summary.best_val_loss !== undefined)) {
+            return obj.summary; // nested
+        }
+        return obj;
+    }
+
+    // ✅ Image fallback: if backend doesn't provide images map, try standard route
+    function fallbackImageUrl(ds, runId, name) {
+        // adjust this if your backend uses a different image endpoint
+        return `/api/results/image?dataset=${encodeURIComponent(ds)}&run_id=${encodeURIComponent(runId)}&name=${encodeURIComponent(name)}`;
     }
 
     async function loadRunDetails(ds, runId) {
         clearDetails();
         selectedRun.textContent = `${ds} / ${runId}`;
 
-        const res = await fetch(`/api/results/get?dataset=${encodeURIComponent(ds)}&run_id=${encodeURIComponent(runId)}`);
-        const data = await res.json();
+        try {
+            const res = await fetch(`/api/results/get?dataset=${encodeURIComponent(ds)}&run_id=${encodeURIComponent(runId)}`);
+            const data = await res.json();
 
-        if (data.status !== "ok") {
-            reportBox.textContent = `❌ ${data.message || "Failed to load run"}`;
-            return;
+            if (data.status !== "ok") {
+                reportBox.textContent = `❌ ${data.message || "Failed to load run"}`;
+                return;
+            }
+
+            runDir.textContent = data.run_dir || "";
+
+            const metricsRaw = data.metrics || {};
+            const metrics = pickMetrics(metricsRaw);
+
+            // evaluation might be separate or inside metrics
+            const evaluation = data.evaluation || {};
+            const evalAccVal = (evaluation.accuracy !== undefined) ? evaluation.accuracy
+                : (metrics.accuracy !== undefined) ? metrics.accuracy
+                    : (metrics.eval_accuracy !== undefined) ? metrics.eval_accuracy
+                        : null;
+
+            const imgs = data.images || {};
+
+            kpis.style.display = "flex";
+            kappaVal.textContent = fmt(metrics.kappa_qwk);
+            bestValAcc.textContent = fmt(metrics.best_val_accuracy);
+            bestValLoss.textContent = fmt(metrics.best_val_loss);
+            evalAcc.textContent = fmt(evalAccVal);
+
+            // Prefer backend-provided URLs
+            imgAcc.src = imgs["curves_accuracy.png"] || fallbackImageUrl(ds, runId, "curves_accuracy.png");
+            imgLoss.src = imgs["curves_loss.png"] || fallbackImageUrl(ds, runId, "curves_loss.png");
+            imgCM.src = imgs["confusion_matrix.png"] || fallbackImageUrl(ds, runId, "confusion_matrix.png");
+
+            reportBox.textContent = data.report || "(no report.txt)";
+        } catch (e) {
+            reportBox.textContent = "❌ Failed to load run details (network/API error)";
         }
-
-        runDir.textContent = data.run_dir || "";
-
-        const metrics = data.metrics || {};
-        const evaluation = data.evaluation || {};
-        const imgs = data.images || {};
-
-        kpis.style.display = "flex";
-        kappaVal.textContent = fmt(metrics.kappa_qwk);
-        bestValAcc.textContent = fmt(metrics.best_val_accuracy);
-        bestValLoss.textContent = fmt(metrics.best_val_loss);
-        evalAcc.textContent = fmt(evaluation.accuracy);
-
-        if (imgs["curves_accuracy.png"]) imgAcc.src = imgs["curves_accuracy.png"];
-        if (imgs["curves_loss.png"]) imgLoss.src = imgs["curves_loss.png"];
-        if (imgs["confusion_matrix.png"]) imgCM.src = imgs["confusion_matrix.png"];
-
-        reportBox.textContent = data.report || "(no report.txt)";
     }
 
     document.getElementById("btnRefresh").addEventListener("click", refreshRuns);

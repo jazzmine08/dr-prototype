@@ -1,28 +1,73 @@
 {% extends "base.html" %}
-{% block title %}Home — DR Ensemble{% endblock %}
 
 {% block content %}
-<div class="text-center p-5 bg-light rounded shadow-sm">
-
-    <!-- ✅ Hero Image -->
-    <img src="{{ url_for('static', filename='img/budiluhur.jpg') }}" class="img-fluid rounded shadow-sm mb-4"
-        style="max-height: 160px; object-fit: cover;">
-
-
-    <h2 class="mt-3">
-        Improving Diabetic Retinopathy Grading Accuracy<br>
-        with a CNN-Based Ensemble Method
-    </h2>
-
-    <p class="mt-3 text-muted">
-        This prototype supports preprocessing, exploratory analysis, CNN training,
-        and ensemble evaluation for diabetic retinopathy datasets.
-    </p>
-
-    <div class="mt-4">
-        <a href="/preprocessing" class="btn btn-success me-2">Start Preprocessing</a>
-        <a href="/training" class="btn btn-warning me-2">Train Models</a>
-        <a href="/results" class="btn btn-primary">View Results</a>
+<div class="container mt-5">
+    <div class="text-center mb-5">
+        <h1>Diabetic Retinopathy Ensemble System</h1>
+        <p class="lead">Please log in to access the system features.</p>
     </div>
+
+    {% if not session.get('user') %}
+    <div class="card mx-auto shadow" style="max-width: 450px;">
+        <div class="card-header bg-dark text-white text-center">
+            <h4 class="mb-0">System Login</h4>
+        </div>
+        <div class="card-body p-4">
+            <form action="/login" method="POST">
+                <div class="mb-3">
+                    <label class="form-label">Username</label>
+                    <div class="input-group">
+                        <span class="input-group-text"><i class="bi bi-person"></i></span>
+                        <input type="text" name="username" class="form-control" placeholder="admin or doctor" required>
+                    </div>
+                </div>
+                <div class="mb-4">
+                    <label class="form-label">Password</label>
+                    <div class="input-group">
+                        <span class="input-group-text"><i class="bi bi-lock"></i></span>
+                        <input type="password" name="password" id="passwordInput" class="form-control"
+                            placeholder="Enter password" required>
+                        <button class="btn btn-outline-secondary" type="button" id="togglePassword">
+                            <i class="bi bi-eye" id="eyeIcon"></i>
+                        </button>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary w-100 py-2 fw-bold">Login</button>
+            </form>
+            <div class="mt-3 small text-muted text-center border-top pt-2">
+                <strong>Credentials:</strong><br>
+                Admin: admin / ABC123 <br>
+                Doctor: doctor / COBA123
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="alert alert-success text-center shadow">
+        <h3>Welcome back, {{ session['user']['username'] }}!</h3>
+        <p>You are logged in as: <strong>{{ session['user']['role'] | upper }}</strong></p>
+        <hr>
+        {% if session['user']['role'] == 'admin' %}
+        <a href="/preprocessing" class="btn btn-dark">Admin Dashboard</a>
+        {% endif %}
+    </div>
+    {% endif %}
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const togglePassword = document.querySelector('#togglePassword');
+    const password = document.querySelector('#passwordInput');
+    const eyeIcon = document.querySelector('#eyeIcon');
+
+    togglePassword.addEventListener('click', function (e) {
+        // Toggle the type attribute
+        const type = password.getAttribute('type') === 'password' ? 'text' : 'password';
+        password.setAttribute('type', type);
+
+        // Toggle the eye icon
+        eyeIcon.classList.toggle('bi-eye');
+        eyeIcon.classList.toggle('bi-eye-slash');
+    });
+</script>
 {% endblock %}

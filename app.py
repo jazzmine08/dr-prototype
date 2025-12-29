@@ -1,20 +1,23 @@
 # app.py
-# Prototype: Preprocessing + EDA + Training (3 CNN) + Ensemble + Results + Predict (APTOS + DRTiD)
-# ✅ Revised: APTOS and DRTiD use the SAME preprocessing conditions + SAME deterministic train/val split
-#            so training + ensemble always see identical folder layout:
-#            <processed_final>/train/<0..4> and <processed_final>/val/<0..4>
+# Prototype: Preprocessing + EDA + Training (3 CNN) + Ensemble + Results + Predict
+# ✅ ONE Flask app, ONE SocketIO
+# ✅ All /api/* endpoints return JSON (even on errors)
+# ✅ Admin-only pages protected
+# ✅ Dataset registry + processed output paths consistent:
+#    X:\dr_prototype\processed\<dataset>\processed_final\{train,val,test}\<class>\*.png
+#    X:\dr_prototype\processed\<dataset>\runs\...
+#    X:\dr_prototype\processed\<dataset>\ensemble_runs\...
 
 from __future__ import annotations
 
 import os
-import time
 import json
 import base64
 import traceback
-import hashlib
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
+from functools import wraps
 
 import cv2
 import numpy as np
@@ -24,78 +27,54 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from flask import Flask, render_template, jsonify, request, send_file, abort
+from flask import (
+    Flask, render_template, jsonify, request, send_file, abort,
+    session, redirect, url_for
+)
 from flask_socketio import SocketIO
 
-# training modules
+# Training modules
 from training.trainer_three_cnn import run_cnn_training
 from training.ensemble_runner import run_ensemble
-import training.training_cnn_v2 as tcnn
+import training.training_cnn_v2 as tcnn  # for custom layers + robust load
+
+# Preprocessing module
+from preprocessing import preprocess_dataset_worker, preprocess_image
+
 
 # =========================================================
-# CLASS LABELS (BACKEND ONLY)
+# CONFIGURATION & PATHS
 # =========================================================
-CLASS_LABELS_5 = {
-    0: "No DR (Normal)",
-    1: "Mild",
-    2: "Moderate",
-    3: "Severe",
-    4: "Proliferative DR",
+ROOT = Path(r"X:\dr_prototype")
+RAW_DATASETS_ROOT = ROOT / "dataset"
+STORAGE_ROOT = ROOT / "processed"
+
+ROOT.mkdir(parents=True, exist_ok=True)
+RAW_DATASETS_ROOT.mkdir(parents=True, exist_ok=True)
+STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
+
+TEMPLATE_DIR = (Path(__file__).resolve().parent / "templates")
+STATIC_DIR = (Path(__file__).resolve().parent / "static")
+
+app = Flask(__name__, template_folder=str(TEMPLATE_DIR), static_folder=str(STATIC_DIR))
+app.config["SECRET_KEY"] = "ABC-123-SECRET-KEY-FIXED"
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+
+
+# =========================================================
+# AUTH USERS
+# =========================================================
+USERS = {
+    "admin": {"password": "ABC123", "role": "admin"},
+    "doctor": {"password": "COBA123", "role": "user"},
 }
 
-def _label_from_index(idx: int) -> str:
-    try:
-        idx = int(idx)
-    except Exception:
-        return str(idx)
-    return CLASS_LABELS_5.get(idx, f"Class {idx}")
-
 
 # =========================================================
-# SPLIT SETTINGS (applies equally to APTOS + DRTiD)
+# SPLIT SETTINGS (used by preprocessing worker)
 # =========================================================
 VAL_RATIO = 0.20     # 80/20 split
 SPLIT_SEED = 123     # deterministic split seed
-
-def _stable_bucket(s: str, seed: int = SPLIT_SEED) -> float:
-    """
-    Deterministic pseudo-random in [0,1) from string.
-    Same image_id will always go to same split across runs/machines.
-    """
-    s = (s or "").strip()
-    h = hashlib.md5(f"{seed}::{s}".encode("utf-8")).hexdigest()
-    # use first 8 hex chars -> 32-bit int
-    v = int(h[:8], 16)
-    return (v % 1_000_000) / 1_000_000.0
-
-def _assign_split(image_id: str, val_ratio: float = VAL_RATIO, seed: int = SPLIT_SEED) -> str:
-    return "val" if _stable_bucket(image_id, seed=seed) < float(val_ratio) else "train"
-
-
-# =========================================================
-# PATHS + STORAGE
-# =========================================================
-BASE_DIR = Path(__file__).resolve().parent
-TEMPLATE_DIR = BASE_DIR / "templates"
-STATIC_DIR = BASE_DIR / "static"
-
-DRIVE_ROOT = Path(r"G:\My Drive")
-RAW_DATASETS_ROOT = DRIVE_ROOT / "dataset"
-
-# standardized outputs (preprocessed images, runs, ensemble_runs, etc.)
-PROCESSED_ROOT = DRIVE_ROOT / "dr_prototype" / "processed"
-LOCAL_FALLBACK_ROOT = BASE_DIR / "dr_prototype_fallback" / "processed"
-
-USE_LOCAL = os.getenv("DR_USE_LOCAL", "0") == "1"
-LOCAL_ROOT = Path(r"X:\Improving Diabetic Retinopathy Grading Accuracy\dr_runs")
-LOCAL_ROOT.mkdir(parents=True, exist_ok=True)
-
-if USE_LOCAL:
-    STORAGE_ROOT = LOCAL_ROOT
-else:
-    STORAGE_ROOT = PROCESSED_ROOT if DRIVE_ROOT.exists() else LOCAL_FALLBACK_ROOT
-
-STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 # =========================================================
@@ -127,9 +106,20 @@ DATASET_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
 }
 
+
+# =========================================================
+# JSON HELPERS
+# =========================================================
+def _json_error(message: str, http: int = 500, **extra):
+    payload = {"status": "error", "message": message}
+    payload.update(extra)
+    return jsonify(payload), http
+
+
 def _safe_ds(dataset_name: str) -> str:
     ds = (dataset_name or "aptos2019").strip().lower()
     return ds if ds in DATASET_REGISTRY else "aptos2019"
+
 
 def get_dataset_info(dataset_name: str) -> Dict[str, Any]:
     dataset_name = _safe_ds(dataset_name)
@@ -138,12 +128,13 @@ def get_dataset_info(dataset_name: str) -> Dict[str, Any]:
     info["processed_base"].mkdir(parents=True, exist_ok=True)
     return info
 
+
 def get_output_paths(dataset_name: str) -> Dict[str, Path]:
     """
-    Output per dataset:
+    Outputs per dataset:
       <STORAGE_ROOT>/<dataset>/processed_final/train/<0..4>/*.png
-      <STORAGE_ROOT>/<dataset>/processed_final/val/<0..4>/*.png   ✅ (now created)
-      <STORAGE_ROOT>/<dataset>/processed_final/test/*.png
+      <STORAGE_ROOT>/<dataset>/processed_final/val/<0..4>/*.png
+      <STORAGE_ROOT>/<dataset>/processed_final/test/<0..4>/*.png  (if your worker creates it)
     """
     base = get_dataset_info(dataset_name)["processed_base"] / "processed_final"
     return {
@@ -153,98 +144,12 @@ def get_output_paths(dataset_name: str) -> Dict[str, Path]:
         "test": base / "test",
     }
 
+
 def ensure_class_folders(root_dir: Path, num_classes: int = 5):
+    root_dir.mkdir(parents=True, exist_ok=True)
     for c in range(num_classes):
         (root_dir / str(c)).mkdir(parents=True, exist_ok=True)
 
-
-# =========================================================
-# FLASK + SOCKETIO
-# =========================================================
-app = Flask(__name__, template_folder=str(TEMPLATE_DIR), static_folder=str(STATIC_DIR))
-app.config["SECRET_KEY"] = "secretkey"
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
-
-@app.errorhandler(500)
-def _err_500(e):
-    if request.path.startswith("/api/"):
-        return jsonify({
-            "status": "error",
-            "message": "Internal Server Error",
-            "path": request.path
-        }), 500
-    return e
-
-
-# =========================================================
-# PAGES
-# =========================================================
-@app.route("/")
-def index():
-    return render_template("index.html")
-
-@app.route("/preprocessing")
-def preprocessing_page():
-    return render_template("preprocessing.html")
-
-@app.route("/eda")
-def eda_page():
-    return render_template("eda.html")
-
-@app.route("/training")
-def training_page():
-    return render_template("training.html")
-
-@app.route("/ensemble")
-def ensemble_page():
-    return render_template("ensemble.html")
-
-@app.route("/results")
-def results_page():
-    return render_template("results.html")
-
-@app.route("/predict")
-def predict_page():
-    return render_template("predict.html")
-
-
-# =========================================================
-# API: list datasets (dropdown)
-# =========================================================
-@app.route("/datasets", methods=["GET"])
-def list_datasets():
-    return jsonify({"datasets": list(DATASET_REGISTRY.keys())})
-
-
-# =========================================================
-# HELPERS (general)
-# =========================================================
-def _strip_ext(name: str) -> str:
-    base = str(name).strip()
-    for ext in (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"):
-        if base.lower().endswith(ext):
-            return base[:-len(ext)]
-    return base
-
-def find_image(folder: Path, image_id: str, default_ext: str) -> str:
-    folder = Path(folder)
-    image_id = str(image_id).strip()
-
-    exact = folder / image_id
-    if exact.exists():
-        return str(exact)
-
-    base = _strip_ext(image_id)
-    for ext in (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"):
-        p = folder / f"{base}{ext}"
-        if p.exists():
-            return str(p)
-
-    p = folder / f"{base}{default_ext}"
-    if p.exists():
-        return str(p)
-
-    return ""
 
 def img_to_base64_png(img_bgr: np.ndarray) -> str:
     ok, buf = cv2.imencode(".png", img_bgr)
@@ -252,245 +157,158 @@ def img_to_base64_png(img_bgr: np.ndarray) -> str:
         return ""
     return base64.b64encode(buf.tobytes()).decode("utf-8")
 
-def _json_error(message: str, http: int = 500, **extra):
-    payload = {"status": "error", "message": message}
-    payload.update(extra)
-    return jsonify(payload), http
+
+def _is_api_request() -> bool:
+    return request.path.startswith("/api/")
+
+
+def _safe_id(name: str) -> str:
+    """Basic path traversal guard for run ids."""
+    s = (name or "").strip()
+    if not s or any(x in s for x in ("..", "/", "\\", ":", "\0")):
+        return ""
+    return s
 
 
 # =========================================================
-# PREPROCESSING PIPELINE (same for APTOS + DRTiD)
+# ACCESS CONTROL
 # =========================================================
-def preprocess_image(img_bgr: np.ndarray) -> np.ndarray:
-    # Crop foreground
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    _, mask = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
-    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if cnts:
-        x, y, w, h = cv2.boundingRect(max(cnts, key=cv2.contourArea))
-        img_bgr = img_bgr[y:y + h, x:x + w]
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if "user" not in session:
+            if _is_api_request():
+                return _json_error("Unauthorized. Please login.", 401)
+            return redirect(url_for("index"))
+        return f(*args, **kwargs)
+    return decorated
 
-    # CLAHE in LAB
-    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    l = clahe.apply(l)
-    img_bgr = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
 
-    # Gray-world-ish normalization
-    img = img_bgr.astype(np.float32)
-    mean = img.mean(axis=(0, 1))
-    img *= mean.mean() / (mean + 1e-6)
-    img_bgr = np.clip(img, 0, 255).astype(np.uint8)
+def admin_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        user = session.get("user")
+        if not user or user.get("role") != "admin":
+            if _is_api_request():
+                return _json_error("Admins only.", 403)
+            return redirect(url_for("index"))
+        return f(*args, **kwargs)
+    return decorated
 
-    # Another CLAHE
-    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    l = clahe.apply(l)
-    img_bgr = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
 
-    # Green channel sharpening
-    g = img_bgr[:, :, 1]
-    blur = cv2.GaussianBlur(g, (0, 0), 2)
-    g = cv2.addWeighted(g, 1.6, blur, -0.6, 0)
-    img_bgr[:, :, 1] = np.clip(g, 0, 255).astype(np.uint8)
+# =========================================================
+# GLOBAL ERROR HANDLERS (API returns JSON)
+# =========================================================
+@app.errorhandler(404)
+def _err_404(e):
+    if _is_api_request():
+        return _json_error("Not Found", 404, path=request.path)
+    return e
 
-    # base preprocessing size for storage
-    return cv2.resize(img_bgr, (224, 224), interpolation=cv2.INTER_AREA)
 
-def _pp_log(msg: str):
-    socketio.emit("preprocess_log", {"message": msg})
+@app.errorhandler(500)
+def _err_500(e):
+    if _is_api_request():
+        return _json_error("Internal Server Error", 500, path=request.path)
+    return e
 
-def _pp_err(msg: str):
-    socketio.emit("preprocess_error", {"message": msg})
 
-def _pp_progress(percent: int, processed: int, total: int, phase: str = ""):
-    socketio.emit("preprocess_progress", {
-        "percent": int(percent),
-        "processed": int(processed),
-        "total": int(total),
-        "phase": phase or ""
-    })
+# =========================================================
+# AUTH ROUTES
+# =========================================================
+@app.route("/login", methods=["POST"])
+def login():
+    username = (request.form.get("username") or "").strip()
+    password = (request.form.get("password") or "").strip()
 
-def _pp_done(msg: str):
-    socketio.emit("preprocess_done", {"message": msg})
+    user = USERS.get(username)
+    if user and user["password"] == password:
+        session["user"] = {"username": username, "role": user["role"]}
+        return redirect(url_for("index"))
 
-def preprocess_dataset_worker(dataset_name: str, limit: Optional[int] = None):
+    return "<h1>Invalid credentials</h1><a href='/'>Try again</a>", 401
+
+
+@app.route("/logout")
+def logout():
+    session.pop("user", None)
+    return redirect(url_for("index"))
+
+
+# =========================================================
+# PAGE ROUTES
+# =========================================================
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/doctor_predict")
+@login_required
+def doctor_predict_page():
+    if session.get("user", {}).get("role") != "user":
+        return redirect(url_for("index"))
+    return render_template("doctor_predict.html")
+
+
+@app.route("/predict")
+@admin_required
+def predict_page_admin():
+    return render_template("predict.html")
+
+
+@app.route("/preprocessing")
+@admin_required
+def preprocessing_page():
+    return render_template("preprocessing.html")
+
+
+@app.route("/eda")
+@admin_required
+def eda_page():
+    return render_template("eda.html")
+
+
+@app.route("/training")
+@admin_required
+def training_page():
+    return render_template("training.html")
+
+
+@app.route("/ensemble")
+@admin_required
+def ensemble_page():
+    return render_template("ensemble.html")
+
+
+@app.route("/results")
+@admin_required
+def results_page():
+    return render_template("results.html")
+
+
+# =========================================================
+# API: DATASETS (dropdown)
+# =========================================================
+@app.route("/api/datasets", methods=["GET"])
+def api_list_datasets():
     """
-    ✅ Now writes TRAIN and VAL folders deterministically for both APTOS + DRTiD:
-      processed_final/train/<class>/*.png
-      processed_final/val/<class>/*.png
+    Some frontends expect {datasets:[...]}.
+    Others expect {data:[...]}.
+    We return BOTH for compatibility.
     """
-    try:
-        dataset_name = _safe_ds(dataset_name)
-        info = get_dataset_info(dataset_name)
-        out = get_output_paths(dataset_name)
-        out_train = out["train"]
-        out_val = out["val"]
-        out_test = out["test"]
-
-        out_train.mkdir(parents=True, exist_ok=True)
-        out_val.mkdir(parents=True, exist_ok=True)
-        out_test.mkdir(parents=True, exist_ok=True)
-
-        num_classes = int(info.get("num_classes", 5))
-        ensure_class_folders(out_train, num_classes=num_classes)
-        ensure_class_folders(out_val, num_classes=num_classes)
-
-        # validate raw paths
-        for k in ["train_csv", "train_img_dir", "test_csv", "test_img_dir"]:
-            p = Path(info[k])
-            if not p.exists():
-                _pp_err(f"❌ [{dataset_name}] Path not found: {p}")
-                return
-
-        _pp_log(f"🟢 Preprocessing started [{dataset_name}]")
-        _pp_log(f"📦 Output base: {out['base']}")
-        _pp_log(f"🔀 Split: train={1.0-VAL_RATIO:.0%} val={VAL_RATIO:.0%} seed={SPLIT_SEED}")
-
-        train_df = pd.read_csv(info["train_csv"])
-        test_df = pd.read_csv(info["test_csv"])
-
-        id_col = info["id_col"]
-        label_col = info["label_col"]
-        default_ext = info["ext"]
-
-        if id_col not in train_df.columns or label_col not in train_df.columns:
-            _pp_err(f"❌ [{dataset_name}] train csv missing columns. Need {id_col},{label_col}. Found: {list(train_df.columns)}")
-            return
-
-        test_id_col = id_col
-        if test_id_col not in test_df.columns:
-            candidates = [c for c in ["id_code", "image_id", "image", "filename"] if c in test_df.columns]
-            if not candidates:
-                _pp_err(f"❌ [{dataset_name}] test csv missing '{id_col}'. Columns: {list(test_df.columns)}")
-                return
-            test_id_col = candidates[0]
-            _pp_log(f"⚠️ [{dataset_name}] test csv missing '{id_col}', using '{test_id_col}' instead.")
-
-        if limit is not None and limit > 0:
-            train_df = train_df.head(limit)
-            test_df = test_df.head(limit)
-            _pp_log(f"🧪 Limit active: train={len(train_df)} test={len(test_df)}")
-
-        total_items = int(len(train_df) + len(test_df))
-        done_items = 0
-
-        _pp_progress(0, 0, total_items, "starting")
-        socketio.sleep(0)
-
-        # TRAIN/VAL
-        processed_train = 0
-        processed_val = 0
-        skipped_train = 0
-        t0 = time.time()
-
-        for _, row in train_df.iterrows():
-            img_id = row[id_col]
-            img_id_str = str(img_id).strip()
-
-            try:
-                label = int(row[label_col])
-                if label < 0 or label >= num_classes:
-                    raise ValueError("label_out_of_range")
-            except Exception:
-                skipped_train += 1
-                done_items += 1
-                continue
-
-            img_path = find_image(Path(info["train_img_dir"]), img_id_str, default_ext)
-            if not img_path:
-                skipped_train += 1
-                done_items += 1
-                continue
-
-            img = cv2.imread(img_path)
-            if img is None:
-                skipped_train += 1
-                done_items += 1
-                continue
-
-            out_img = preprocess_image(img)
-            out_name = f"{_strip_ext(img_id_str)}.png"
-
-            split = _assign_split(_strip_ext(img_id_str), val_ratio=VAL_RATIO, seed=SPLIT_SEED)
-            if split == "val":
-                save_path = out_val / str(label) / out_name
-                processed_val += 1
-                phase = "val"
-            else:
-                save_path = out_train / str(label) / out_name
-                processed_train += 1
-                phase = "train"
-
-            cv2.imwrite(str(save_path), out_img)
-            done_items += 1
-
-            if done_items % 50 == 0 or done_items == total_items:
-                pct = int(round(100.0 * done_items / max(total_items, 1)))
-                _pp_progress(pct, done_items, total_items, phase)
-                socketio.sleep(0)
-
-            if (processed_train + processed_val) % 300 == 0:
-                _pp_log(
-                    f"✅ [{dataset_name}] Train={processed_train} Val={processed_val} "
-                    f"| skipped={skipped_train} | {time.time()-t0:.1f}s"
-                )
-
-        # TEST
-        processed_test = 0
-        skipped_test = 0
-        t1 = time.time()
-
-        for _, row in test_df.iterrows():
-            img_id = row[test_id_col]
-            img_id_str = str(img_id).strip()
-
-            img_path = find_image(Path(info["test_img_dir"]), img_id_str, default_ext)
-            if not img_path:
-                skipped_test += 1
-                done_items += 1
-                continue
-
-            img = cv2.imread(img_path)
-            if img is None:
-                skipped_test += 1
-                done_items += 1
-                continue
-
-            out_img = preprocess_image(img)
-            out_name = f"{_strip_ext(img_id_str)}.png"
-            save_path = out_test / out_name
-            cv2.imwrite(str(save_path), out_img)
-
-            processed_test += 1
-            done_items += 1
-
-            if done_items % 50 == 0 or done_items == total_items:
-                pct = int(round(100.0 * done_items / max(total_items, 1)))
-                _pp_progress(pct, done_items, total_items, "test")
-                socketio.sleep(0)
-
-            if processed_test % 300 == 0:
-                _pp_log(f"✅ [{dataset_name}] Test processed: {processed_test} | skipped: {skipped_test} | {time.time()-t1:.1f}s")
-
-        _pp_progress(100, total_items, total_items, "done")
-        socketio.sleep(0)
-
-        _pp_done(
-            f"🎉 Done [{dataset_name}] | Train: {processed_train} | Val: {processed_val} (skipped {skipped_train}) | "
-            f"Test: {processed_test} (skipped {skipped_test}) | Output: {out['base']}"
-        )
-
-    except Exception as e:
-        _pp_err(f"❌ [{dataset_name}] Error: {e}")
+    ds = list(DATASET_REGISTRY.keys())
+    return jsonify({"status": "ok", "datasets": ds, "data": ds})
 
 
-@app.route("/start_preprocessing", methods=["POST"])
-def start_preprocessing():
+# =========================================================
+# PREPROCESSING (delegated to preprocessing.py)
+# =========================================================
+@app.route("/api/start_preprocessing", methods=["POST"])
+@admin_required
+def api_start_preprocessing():
     payload = request.get_json(silent=True) or request.form.to_dict() or {}
-    dataset_name = payload.get("dataset") or "aptos2019"
-    dataset_name = dataset_name.strip().lower()
+    dataset_name = _safe_ds((payload.get("dataset") or "aptos2019").strip().lower())
 
     limit = payload.get("limit")
     try:
@@ -498,23 +316,24 @@ def start_preprocessing():
     except Exception:
         limit_int = None
 
-    if dataset_name == "all":
-        def _worker_all():
-            for ds in DATASET_REGISTRY.keys():
-                preprocess_dataset_worker(ds, limit=limit_int)
-        socketio.start_background_task(_worker_all)
-        return jsonify({"status": "ok", "message": "Preprocessing started for ALL datasets..."})
+    def _run_one(ds: str):
+        preprocess_dataset_worker(
+            ds,
+            get_dataset_info=get_dataset_info,
+            get_output_paths=get_output_paths,
+            val_ratio=VAL_RATIO,
+            split_seed=SPLIT_SEED,
+            socketio=socketio,
+            limit=limit_int,
+        )
 
-    dataset_name = _safe_ds(dataset_name)
-    socketio.start_background_task(preprocess_dataset_worker, dataset_name, limit_int)
-    return jsonify({"status": "ok", "message": f"Preprocessing started ({dataset_name})..."})
+    socketio.start_background_task(_run_one, dataset_name)
+    return jsonify({"status": "ok", "message": f"Preprocessing started ({dataset_name})...", "dataset": dataset_name})
 
 
-# =========================================================
-# PREPROCESS SAMPLES (Original vs Processed)
-# =========================================================
-@app.route("/preprocess_samples", methods=["GET"])
-def preprocess_samples():
+@app.route("/api/preprocess_samples", methods=["GET"])
+@admin_required
+def api_preprocess_samples():
     dataset_name = _safe_ds(request.args.get("dataset") or "aptos2019")
     info = get_dataset_info(dataset_name)
 
@@ -527,8 +346,33 @@ def preprocess_samples():
     wanted = [0, 2, 4]
     samples = []
 
+    def _strip_ext(name: str) -> str:
+        base = str(name).strip()
+        for ext in (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"):
+            if base.lower().endswith(ext):
+                return base[:-len(ext)]
+        return base
+
+    def find_image(folder: Path, image_id: str, default_ext: str) -> str:
+        folder = Path(folder)
+        image_id = str(image_id).strip()
+
+        exact = folder / image_id
+        if exact.exists():
+            return str(exact)
+
+        base = _strip_ext(image_id)
+        for ext in (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"):
+            p = folder / f"{base}{ext}"
+            if p.exists():
+                return str(p)
+
+        p = folder / f"{base}{default_ext}"
+        if p.exists():
+            return str(p)
+        return ""
+
     def _find_one_processed_in_class(c: int) -> Optional[Path]:
-        # prefer train, fallback val
         for root in (train_dir, val_dir):
             d = root / str(c)
             if not d.exists():
@@ -551,14 +395,14 @@ def preprocess_samples():
         proc_img = cv2.imread(str(processed_path))
         if proc_img is not None:
             proc_thumb = cv2.resize(proc_img, (256, 256), interpolation=cv2.INTER_AREA)
-            processed_b64 = f"data:image/png;base64,{img_to_base64_png(proc_thumb)}"
+            processed_b64 = "data:image/png;base64," + img_to_base64_png(proc_thumb)
 
         orig_path = find_image(raw_train_dir, image_id, default_ext)
         if orig_path:
             orig_img = cv2.imread(orig_path)
             if orig_img is not None:
                 orig_thumb = cv2.resize(orig_img, (256, 256), interpolation=cv2.INTER_AREA)
-                original_b64 = f"data:image/png;base64,{img_to_base64_png(orig_thumb)}"
+                original_b64 = "data:image/png;base64," + img_to_base64_png(orig_thumb)
 
         samples.append({
             "class": c,
@@ -574,6 +418,7 @@ def preprocess_samples():
 # EDA API
 # =========================================================
 @app.route("/api/eda/summary", methods=["POST"])
+@admin_required
 def api_eda_summary():
     payload = request.get_json(silent=True) or request.form.to_dict() or {}
     dataset_name = _safe_ds(payload.get("dataset") or "aptos2019")
@@ -657,8 +502,9 @@ def api_eda_summary():
 # =========================================================
 # TRAINING
 # =========================================================
-@app.route("/start_training", methods=["POST"])
-def start_training():
+@app.route("/api/start_training", methods=["POST"])
+@admin_required
+def api_start_training():
     payload = request.get_json(silent=True) or request.form.to_dict() or {}
     dataset_name = _safe_ds(payload.get("dataset") or "aptos2019")
 
@@ -666,7 +512,6 @@ def start_training():
     out_train = out["train"]
     out_val = out["val"]
 
-    # ensure folders exist for both datasets
     num_classes = int(get_dataset_info(dataset_name).get("num_classes", 5))
     ensure_class_folders(out_train, num_classes=num_classes)
     ensure_class_folders(out_val, num_classes=num_classes)
@@ -677,8 +522,7 @@ def start_training():
 
     _setdefault("dataset", dataset_name)
 
-    # ✅ IMPORTANT: pass processed_dir as TRAIN folder.
-    # training_cnn_v2.make_datasets will detect sibling VAL folder.
+    # ✅ training runner expects TRAIN folder; val is sibling under processed_final
     _setdefault("processed_dir", str(out_train))
 
     _setdefault("epochs", 20)
@@ -691,12 +535,28 @@ def start_training():
     _setdefault("cache_dataset", False)
     _setdefault("seed", 123)
 
+    _setdefault("balanced_sampling", True)
+    _setdefault("use_augmentation", True)
+    _setdefault("aug_rot_deg", 30.0)
+    _setdefault("aug_zoom", 0.10)
+    _setdefault("aug_shift", 0.05)
+    _setdefault("aug_contrast", 0.15)
+
+    # Compatibility: some code expects image_size field
+    try:
+        s = int(payload.get("img_size") or 224)
+    except Exception:
+        s = 224
+    _setdefault("image_size", [s, s])
+
     socketio.start_background_task(run_cnn_training, socketio, payload)
-    return jsonify({"status": "ok", "message": f"Training started ({dataset_name})..."})
+    return jsonify({"status": "ok", "message": f"Training started ({dataset_name})...", "dataset": dataset_name})
+
 
 @app.route("/api/train-three-cnn", methods=["POST"])
+@admin_required
 def api_train_three_cnn():
-    return start_training()
+    return api_start_training()
 
 
 # =========================================================
@@ -704,22 +564,63 @@ def api_train_three_cnn():
 # =========================================================
 _ALLOWED_RESULT_IMAGES = {"curves_accuracy.png", "curves_loss.png", "confusion_matrix.png"}
 
+
 @app.route("/api/results/list", methods=["GET"])
+@admin_required
 def api_results_list():
     dataset = _safe_ds(request.args.get("dataset") or "aptos2019")
     runs_dir = STORAGE_ROOT / dataset / "runs"
     if not runs_dir.exists():
-        return jsonify({"status": "ok", "dataset": dataset, "runs": []})
+        return jsonify({"status": "ok", "dataset": dataset, "runs": [], "items": []})
 
     runs = sorted([p.name for p in runs_dir.iterdir() if p.is_dir()], reverse=True)
-    return jsonify({"status": "ok", "dataset": dataset, "runs": runs})
+
+    items = []
+    for rid in runs[:200]:
+        run_dir = runs_dir / rid
+        rec_path = run_dir / "run_record.json"
+        met_path = run_dir / "metrics.json"
+
+        rec = {}
+        met = {}
+        if rec_path.exists():
+            try:
+                rec = json.loads(rec_path.read_text(encoding="utf-8"))
+            except Exception:
+                rec = {}
+        if met_path.exists():
+            try:
+                met = json.loads(met_path.read_text(encoding="utf-8"))
+            except Exception:
+                met = {}
+
+        best_acc = rec.get("best_val_accuracy")
+        qwk = rec.get("kappa_qwk")
+        model = rec.get("model") or rec.get("backbone") or ""
+
+        if best_acc is None:
+            best_acc = (met.get("summary") or {}).get("best_val_accuracy") or met.get("best_val_accuracy")
+        if qwk is None:
+            qwk = (met.get("summary") or {}).get("kappa_qwk") or met.get("kappa_qwk")
+        if not model:
+            model = (met.get("summary") or {}).get("model") or (met.get("summary") or {}).get("backbone") or met.get("model") or met.get("backbone") or ""
+
+        items.append({
+            "run_id": rid,
+            "model": model,
+            "best_val_accuracy": best_acc,
+            "kappa_qwk": qwk,
+        })
+
+    return jsonify({"status": "ok", "dataset": dataset, "runs": runs, "items": items})
+
 
 @app.route("/api/results/get", methods=["GET"])
+@admin_required
 def api_results_get():
     dataset = _safe_ds(request.args.get("dataset") or "aptos2019")
-    run_id = (request.args.get("run_id") or "").strip()
-
-    if not run_id or any(x in run_id for x in ("..", "/", "\\", ":", "\0")):
+    run_id = _safe_id(request.args.get("run_id") or "")
+    if not run_id:
         return _json_error("Invalid run_id", 400)
 
     run_dir = STORAGE_ROOT / dataset / "runs" / run_id
@@ -729,10 +630,12 @@ def api_results_get():
     metrics_path = run_dir / "metrics.json"
     eval_path = run_dir / "evaluation.json"
     report_path = run_dir / "report.txt"
+    record_path = run_dir / "run_record.json"
 
     metrics = {}
     evaluation = {}
     report = ""
+    run_record = {}
 
     try:
         if metrics_path.exists():
@@ -752,6 +655,12 @@ def api_results_get():
     except Exception:
         report = "Failed to read report.txt"
 
+    try:
+        if record_path.exists():
+            run_record = json.loads(record_path.read_text(encoding="utf-8"))
+    except Exception:
+        run_record = {"_error": "Failed to read run_record.json"}
+
     images = {}
     for name in _ALLOWED_RESULT_IMAGES:
         p = run_dir / name
@@ -766,16 +675,19 @@ def api_results_get():
         "metrics": metrics,
         "evaluation": evaluation,
         "report": report,
+        "run_record": run_record,
         "images": images,
     })
 
+
 @app.route("/api/results/image", methods=["GET"])
+@admin_required
 def api_results_image():
     dataset = _safe_ds(request.args.get("dataset") or "aptos2019")
-    run_id = (request.args.get("run_id") or "").strip()
+    run_id = _safe_id(request.args.get("run_id") or "")
     name = (request.args.get("name") or "").strip()
 
-    if not run_id or any(x in run_id for x in ("..", "/", "\\", ":", "\0")):
+    if not run_id:
         abort(400)
     if name not in _ALLOWED_RESULT_IMAGES:
         abort(400)
@@ -786,81 +698,46 @@ def api_results_image():
 
     return send_file(path)
 
-def _extract_model_name_from_run(run_dir: Path) -> str:
-    for p in (run_dir / "metrics.json", run_dir / "evaluation.json"):
-        if not p.exists():
-            continue
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            for key in ("model", "model_name", "backbone", "backbone_name"):
-                val = data.get(key)
-                if isinstance(val, str) and val.strip():
-                    return val.strip()
-        except Exception:
-            pass
-    return "unknown"
-
-def _extract_created_at_from_run(run_dir: Path) -> str:
-    for p in (run_dir / "metrics.json", run_dir / "evaluation.json"):
-        if not p.exists():
-            continue
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            val = data.get("created_at")
-            if isinstance(val, str) and val.strip():
-                return val.strip()
-        except Exception:
-            pass
-    return ""
-
-@app.route("/api/results/list_detailed", methods=["GET"])
-def api_results_list_detailed():
-    dataset = _safe_ds(request.args.get("dataset") or "aptos2019")
-    runs_dir = STORAGE_ROOT / dataset / "runs"
-    if not runs_dir.exists():
-        return jsonify({"status": "ok", "dataset": dataset, "runs": []})
-
-    items = []
-    for d in runs_dir.iterdir():
-        if not d.is_dir():
-            continue
-        items.append({
-            "run_id": d.name,
-            "model_name": _extract_model_name_from_run(d),
-            "created_at": _extract_created_at_from_run(d),
-        })
-
-    items.sort(key=lambda x: (runs_dir / x["run_id"]).stat().st_mtime, reverse=True)
-    return jsonify({"status": "ok", "dataset": dataset, "runs": items})
-
 
 # =========================================================
 # ENSEMBLE
 # =========================================================
-@app.route("/start_ensemble", methods=["POST"])
-def start_ensemble():
+@app.route("/api/start_ensemble", methods=["POST"])
+@admin_required
+def api_start_ensemble():
     payload = request.get_json(silent=True) or request.form.to_dict() or {}
 
-    payload.setdefault("dataset", "aptos2019")
-    payload["dataset"] = _safe_ds(payload.get("dataset"))
+    dataset = _safe_ds(payload.get("dataset") or "aptos2019")
+    payload["dataset"] = dataset
 
-    # ✅ ensure processed_dir is always set consistently (train folder)
-    out = get_output_paths(payload["dataset"])
+    out = get_output_paths(dataset)
     payload.setdefault("processed_dir", str(out["train"]))
 
     payload.setdefault("method", "softvote")
+    payload.setdefault("weighting", "by_qwk")
     payload.setdefault("batch_size", 16)
     payload.setdefault("img_size", 224)
     payload.setdefault("seed", 123)
     payload.setdefault("cache_dataset", False)
+    payload.setdefault("eval_split", "val")  # "val" or "test"
+
+    run_ids = payload.get("run_ids")
+    if not (isinstance(run_ids, list) and len(run_ids) == 3):
+        r1 = (payload.get("run1") or "").strip()
+        r2 = (payload.get("run2") or "").strip()
+        r3 = (payload.get("run3") or "").strip()
+        if r1 and r2 and r3:
+            payload["run_ids"] = [r1, r2, r3]
 
     socketio.start_background_task(run_ensemble, socketio, payload)
-    return jsonify({"status": "ok", "message": "Ensemble started..."})
+    return jsonify({"status": "ok", "message": "Ensemble started...", "dataset": dataset})
 
 
 _ALLOWED_ENSEMBLE_IMAGES = {"confusion_matrix.png"}
 
+
 @app.route("/api/ensemble/list", methods=["GET"])
+@admin_required
 def api_ensemble_list():
     dataset = _safe_ds(request.args.get("dataset") or "aptos2019")
     ens_dir = STORAGE_ROOT / dataset / "ensemble_runs"
@@ -870,12 +747,13 @@ def api_ensemble_list():
     runs = sorted([p.name for p in ens_dir.iterdir() if p.is_dir()], reverse=True)
     return jsonify({"status": "ok", "dataset": dataset, "runs": runs})
 
+
 @app.route("/api/ensemble/get", methods=["GET"])
+@admin_required
 def api_ensemble_get():
     dataset = _safe_ds(request.args.get("dataset") or "aptos2019")
-    run_id = (request.args.get("run_id") or "").strip()
-
-    if not run_id or any(x in run_id for x in ("..", "/", "\\", ":", "\0")):
+    run_id = _safe_id(request.args.get("run_id") or "")
+    if not run_id:
         return _json_error("Invalid run_id", 400)
 
     run_dir = STORAGE_ROOT / dataset / "ensemble_runs" / run_id
@@ -915,13 +793,15 @@ def api_ensemble_get():
         "images": images,
     })
 
+
 @app.route("/api/ensemble/image", methods=["GET"])
+@admin_required
 def api_ensemble_image():
     dataset = _safe_ds(request.args.get("dataset") or "aptos2019")
-    run_id = (request.args.get("run_id") or "").strip()
+    run_id = _safe_id(request.args.get("run_id") or "")
     name = (request.args.get("name") or "").strip()
 
-    if not run_id or any(x in run_id for x in ("..", "/", "\\", ":", "\0")):
+    if not run_id:
         abort(400)
     if name not in _ALLOWED_ENSEMBLE_IMAGES:
         abort(400)
@@ -934,93 +814,327 @@ def api_ensemble_image():
 
 
 # =========================================================
-# PREDICT (3 CNN + simple soft-vote ensemble)
+# OPTIONAL: Dedicated endpoint for Run dropdown options
 # =========================================================
-def _normalize_backbone_name(name: str) -> str:
-    if not name:
-        return ""
-    n = str(name).strip().lower().replace("-", "").replace("_", "")
-    alias = {
-        "densenet": "DenseNet121",
-        "densenet121": "DenseNet121",
-        "inceptionresnet": "InceptionResNetV2",
-        "inceptionresnetv2": "InceptionResNetV2",
-        "efficientnet": "EfficientNetV2B0",
-        "efficientnetv2b0": "EfficientNetV2B0",
-    }
-    return alias.get(n, str(name).strip())
-
-def _find_latest_run_for_backbone(dataset: str, backbone: str) -> Dict[str, Any]:
+@app.route("/api/runs/options", methods=["GET"])
+@admin_required
+def api_runs_options():
+    dataset = _safe_ds(request.args.get("dataset") or "aptos2019")
     runs_dir = STORAGE_ROOT / dataset / "runs"
     if not runs_dir.exists():
-        raise FileNotFoundError(f"runs_dir not found: {runs_dir}")
+        return jsonify({"status": "ok", "dataset": dataset, "runs": []})
 
-    backbone = _normalize_backbone_name(backbone)
+    out = []
+    for run_dir in sorted([p for p in runs_dir.iterdir() if p.is_dir()], key=lambda p: p.name, reverse=True):
+        rid = run_dir.name
+        rec_path = run_dir / "run_record.json"
+        met_path = run_dir / "metrics.json"
 
-    candidates: List[Tuple[float, Path, Dict[str, Any]]] = []
-    for d in runs_dir.iterdir():
-        if not d.is_dir():
-            continue
-        eval_path = d / "evaluation.json"
-        if not eval_path.exists():
-            continue
-        try:
-            data = json.loads(eval_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
+        rec = {}
+        met = {}
+        if rec_path.exists():
+            try:
+                rec = json.loads(rec_path.read_text(encoding="utf-8"))
+            except Exception:
+                rec = {}
+        if met_path.exists():
+            try:
+                met = json.loads(met_path.read_text(encoding="utf-8"))
+            except Exception:
+                met = {}
 
-        m = _normalize_backbone_name(data.get("model") or data.get("backbone") or data.get("model_name") or "")
-        if m != backbone:
-            continue
+        best_acc = rec.get("best_val_accuracy")
+        qwk = rec.get("kappa_qwk")
+        model = rec.get("model") or rec.get("backbone") or ""
 
-        candidates.append((d.stat().st_mtime, d, data))
+        if best_acc is None:
+            best_acc = (met.get("summary") or {}).get("best_val_accuracy") or met.get("best_val_accuracy")
+        if qwk is None:
+            qwk = (met.get("summary") or {}).get("kappa_qwk") or met.get("kappa_qwk")
+        if not model:
+            model = (met.get("summary") or {}).get("model") or (met.get("summary") or {}).get("backbone") or met.get("model") or met.get("backbone") or ""
 
-    if not candidates:
-        raise FileNotFoundError(f"No run found for backbone={backbone} in {runs_dir}")
+        out.append({
+            "run_id": rid,
+            "model": model,
+            "best_val_accuracy": best_acc,
+            "kappa_qwk": qwk,
+        })
 
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    _, run_dir, data = candidates[0]
+    return jsonify({"status": "ok", "dataset": dataset, "runs": out})
 
-    class_names = data.get("class_names")
-    if not isinstance(class_names, list) or len(class_names) == 0:
-        num_classes = int(data.get("num_classes") or 5)
-        class_names = [str(i) for i in range(num_classes)]
-    else:
-        num_classes = len(class_names)
 
-    image_size = data.get("image_size") or [224, 224]
-    if isinstance(image_size, (list, tuple)) and len(image_size) == 2:
-        image_size = (int(image_size[0]), int(image_size[1]))
-    else:
-        image_size = (224, 224)
+# =========================================================
+# PREDICT HELPERS (REAL MODEL INFERENCE)
+# =========================================================
+BACKBONES = ["DenseNet121", "InceptionResNetV2", "EfficientNetV2B0"]
 
-    weights_path = data.get("best_weights_path") or str(run_dir / "best.weights.h5")
-    if not os.path.exists(weights_path):
-        raise FileNotFoundError(f"best_weights_path not found: {weights_path}")
+# simple in-process cache so repeated predictions are fast
+_MODEL_CACHE: Dict[str, Any] = {}  # path -> keras.Model
+_METRICS_CACHE: Dict[str, Dict[str, Any]] = {}  # run_dir -> metrics dict
 
-    dropout = data.get("dropout")
-    try:
-        dropout = float(dropout) if dropout is not None else 0.3
-    except Exception:
-        dropout = 0.3
 
-    return {
-        "backbone": backbone,
-        "run_dir": str(run_dir),
-        "weights_path": str(weights_path),
-        "num_classes": int(num_classes),
-        "class_names": class_names,
-        "image_size": image_size,
-        "dropout": float(dropout),
+def _label_from_index(idx: int) -> str:
+    mapping = {
+        0: "No DR",
+        1: "Mild",
+        2: "Moderate",
+        3: "Severe",
+        4: "Proliferative DR",
     }
+    return mapping.get(int(idx), f"Class {idx}")
 
+
+def _read_json_safe(p: Path) -> Dict[str, Any]:
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _load_metrics_for_run(run_dir: Path) -> Dict[str, Any]:
+    k = str(run_dir)
+    if k in _METRICS_CACHE:
+        return _METRICS_CACHE[k]
+    m = {}
+    mp = run_dir / "metrics.json"
+    rp = run_dir / "run_record.json"
+    if mp.exists():
+        m = _read_json_safe(mp)
+    elif rp.exists():
+        m = _read_json_safe(rp)
+    _METRICS_CACHE[k] = m
+    return m
+
+
+def _get_run_model_path(run_dir: Path) -> Optional[Path]:
+    # prefer full saved model
+    p = run_dir / "best_model.keras"
+    if p.exists():
+        return p
+    # fallback to weights only (not used here for prediction; prediction expects .keras)
+    return None
+
+
+def _load_keras_model_cached(model_path: Path):
+    key = str(model_path.resolve())
+    if key in _MODEL_CACHE:
+        return _MODEL_CACHE[key]
+
+    import tensorflow as tf
+    from tensorflow import keras
+
+    custom_objects = {}
+    if hasattr(tcnn, "BackbonePreprocess"):
+        custom_objects["BackbonePreprocess"] = tcnn.BackbonePreprocess
+    if hasattr(tcnn, "RandomBrightness"):
+        custom_objects["RandomBrightness"] = tcnn.RandomBrightness
+
+    model = keras.models.load_model(str(model_path), compile=False, custom_objects=custom_objects)
+
+    # warm build
+    try:
+        ishape = model.input_shape
+        if isinstance(ishape, (list, tuple)) and len(ishape) >= 4:
+            h = int(ishape[1] or 224)
+            w = int(ishape[2] or 224)
+            _ = model(tf.zeros((1, h, w, 3), dtype=tf.float32), training=False)
+    except Exception:
+        pass
+
+    _MODEL_CACHE[key] = model
+    return model
+
+
+def _latest_run_for_backbone(dataset: str, backbone: str) -> Optional[Path]:
+    runs_root = STORAGE_ROOT / dataset / "runs"
+    if not runs_root.exists():
+        return None
+    # run naming: YYYY-MM-DD_HH-MM-SS_<BackboneName>
+    candidates = []
+    for p in runs_root.iterdir():
+        if not p.is_dir():
+            continue
+        name = p.name
+        if name.endswith(f"_{backbone}"):
+            # must have model file
+            if (p / "best_model.keras").exists():
+                candidates.append(p)
+    if not candidates:
+        return None
+    # lexicographic works because timestamp prefix
+    candidates.sort(key=lambda x: x.name, reverse=True)
+    return candidates[0]
+
+
+def _resolve_selected_run_dirs(dataset: str, form: Dict[str, Any]) -> Dict[str, Path]:
+    """
+    Returns mapping backbone -> run_dir
+    Priority:
+      1) explicit run_ids[] or run1/run2/run3 (admin UI can send)
+      2) latest per backbone
+    """
+    runs_root = STORAGE_ROOT / dataset / "runs"
+    out: Dict[str, Path] = {}
+
+    run_ids = form.get("run_ids")
+    if isinstance(run_ids, list) and len(run_ids) >= 1:
+        # if frontend sends list of 3, we try to map by reading metrics/model field
+        for rid in run_ids:
+            rid_s = _safe_id(str(rid))
+            if not rid_s:
+                continue
+            rd = runs_root / rid_s
+            if not rd.exists():
+                continue
+            met = _load_metrics_for_run(rd)
+            model_name = (
+                (met.get("model") or met.get("backbone"))
+                or ((met.get("summary") or {}).get("model") or (met.get("summary") or {}).get("backbone"))
+                or ""
+            )
+            model_name = str(model_name)
+            for bb in BACKBONES:
+                if bb.lower() == model_name.lower():
+                    out[bb] = rd
+        # if still missing, fall back later
+
+    # legacy: run1/run2/run3
+    r1 = _safe_id(str(form.get("run1") or ""))
+    r2 = _safe_id(str(form.get("run2") or ""))
+    r3 = _safe_id(str(form.get("run3") or ""))
+    for rid in [r1, r2, r3]:
+        if not rid:
+            continue
+        rd = runs_root / rid
+        if not rd.exists():
+            continue
+        met = _load_metrics_for_run(rd)
+        model_name = (
+            (met.get("model") or met.get("backbone"))
+            or ((met.get("summary") or {}).get("model") or (met.get("summary") or {}).get("backbone"))
+            or ""
+        )
+        model_name = str(model_name)
+        for bb in BACKBONES:
+            if bb.lower() == model_name.lower():
+                out[bb] = rd
+
+    # fill missing with latest
+    for bb in BACKBONES:
+        if bb not in out:
+            latest = _latest_run_for_backbone(dataset, bb)
+            if latest is not None:
+                out[bb] = latest
+
+    # only keep those that have model file
+    out2 = {}
+    for bb, rd in out.items():
+        mp = _get_run_model_path(rd)
+        if mp and mp.exists():
+            out2[bb] = rd
+    return out2
+
+
+def _auto_weights_from_runs(run_dirs: Dict[str, Path], weighting: str = "equal") -> Dict[str, float]:
+    """
+    weighting:
+      - equal
+      - by_qwk
+      - by_valacc
+    """
+    mode = (weighting or "equal").strip().lower()
+    if mode not in ("equal", "by_qwk", "by_valacc"):
+        mode = "equal"
+
+    if mode == "equal":
+        n = max(1, len(run_dirs))
+        return {bb: 1.0 / n for bb in run_dirs.keys()}
+
+    scores: Dict[str, float] = {}
+    for bb, rd in run_dirs.items():
+        met = _load_metrics_for_run(rd)
+        summary = met.get("summary") or {}
+        if mode == "by_qwk":
+            s = summary.get("kappa_qwk", None)
+            if s is None:
+                s = met.get("kappa_qwk", None)
+        else:
+            s = summary.get("best_val_accuracy", None)
+            if s is None:
+                s = met.get("best_val_accuracy", None)
+        try:
+            s = float(s)
+        except Exception:
+            s = 0.0
+        if s < 0:
+            s = 0.0
+        scores[bb] = s
+
+    tot = float(sum(scores.values()))
+    if tot <= 0:
+        n = max(1, len(run_dirs))
+        return {bb: 1.0 / n for bb in run_dirs.keys()}
+    return {bb: float(scores[bb] / tot) for bb in scores.keys()}
+
+
+def _predict_one(model, img_bgr_proc: np.ndarray) -> Tuple[int, List[float]]:
+    """
+    model expects RGB float32 0..255 (because BackbonePreprocess does preprocess_input).
+    img_bgr_proc: preprocessed output in BGR uint8/float, any size.
+    """
+    import tensorflow as tf
+
+    # model input size
+    ishape = model.input_shape
+    if isinstance(ishape, (list, tuple)) and len(ishape) >= 4:
+        h = int(ishape[1] or 224)
+        w = int(ishape[2] or 224)
+    else:
+        h, w = 224, 224
+
+    img_bgr = img_bgr_proc
+    if img_bgr is None:
+        raise ValueError("preprocessed image is None")
+
+    img_resized = cv2.resize(img_bgr, (w, h), interpolation=cv2.INTER_AREA)
+
+    # BGR -> RGB
+    img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+
+    x = img_rgb.astype(np.float32)
+    x = np.expand_dims(x, axis=0)  # [1,H,W,3]
+
+    probs = model.predict(x, verbose=0)
+    probs = np.asarray(probs).reshape(-1)
+    # safety normalize
+    s = float(np.sum(probs))
+    if s > 0:
+        probs = probs / s
+
+    pred = int(np.argmax(probs))
+    return pred, [float(p) for p in probs.tolist()]
+
+
+# =========================================================
+# PREDICT API (ADMIN gets per-model + ensemble, USER gets ensemble only)
+# =========================================================
 @app.route("/api/predict", methods=["POST"])
+@login_required
 def api_predict():
     """
     Upload field: image
+    Optional form fields:
+      - dataset
+      - weighting: equal | by_qwk | by_valacc   (admin)
+      - run1/run2/run3 or run_ids[]            (admin; optional; else auto latest)
     Returns JSON always.
     """
     try:
+        user = session.get("user") or {}
+        role = user.get("role", "user")
+        is_admin = (role == "admin")
+
         dataset = _safe_ds(request.form.get("dataset") or "aptos2019")
 
         f = request.files.get("image")
@@ -1032,84 +1146,93 @@ def api_predict():
         if img_bgr is None:
             return _json_error("Failed to decode image. Upload a valid jpg/png.", 400)
 
-        # preprocess once (224x224 base)
-        proc_bgr_224 = preprocess_image(img_bgr)
+        # Preprocess once at a high-ish resolution, then each model resizes as needed
+        proc_bgr = preprocess_image(img_bgr, out_size=(512, 512))
 
-        backbones = ["DenseNet121", "InceptionResNetV2", "EfficientNetV2B0"]
-        models_out = []
-        probs_list = []
-
-        for b in backbones:
-            try:
-                sig = _find_latest_run_for_backbone(dataset, b)
-
-                # match training image_size
-                target_w, target_h = sig["image_size"][0], sig["image_size"][1]
-                proc_for_model = cv2.resize(proc_bgr_224, (target_w, target_h), interpolation=cv2.INTER_AREA)
-
-                proc_rgb = cv2.cvtColor(proc_for_model, cv2.COLOR_BGR2RGB)
-                x = np.expand_dims(proc_rgb.astype(np.float32), axis=0)  # (1,H,W,3)
-
-                # match dropout to avoid mismatch
-                model = tcnn.build_model(
-                    backbone_name=sig["backbone"],
-                    image_size=sig["image_size"],
-                    num_classes=sig["num_classes"],
-                    dropout=sig["dropout"],
-                    seed=123,
-                )
-                model.load_weights(sig["weights_path"])
-
-                pred = model.predict(x, verbose=0)
-                probs = pred[0].astype(float).tolist()
-                pred_idx = int(np.argmax(probs))
-                pred_label = _label_from_index(pred_idx)
-
-                probs_list.append(probs)
-
-                models_out.append({
-                    "model": sig["backbone"],
-                    "status": "ok",
-                    "run_dir": sig["run_dir"],
-                    "weights_path": sig["weights_path"],
-                    "num_classes": sig["num_classes"],
-                    "class_names": sig["class_names"],
-                    "pred_class_index": pred_idx,
-                    "pred_label": pred_label,
-                    "probs": probs,
-                })
-
-            except Exception as ex:
-                models_out.append({
-                    "model": b,
-                    "status": "error",
-                    "message": str(ex),
-                })
-
-        ensemble = None
-        if probs_list:
-            avg = np.mean(np.array(probs_list, dtype=np.float32), axis=0).tolist()
-            ens_idx = int(np.argmax(avg))
-            ens_label = _label_from_index(ens_idx)
-
-            ensemble = {
-                "method": "softvote_mean",
-                "pred_class_index": ens_idx,
-                "pred_label": ens_label,
-                "probs": avg,
-            }
-
+        # Preview for UI
         preview_b64 = "data:image/png;base64," + img_to_base64_png(
-            cv2.resize(proc_bgr_224, (256, 256), interpolation=cv2.INTER_AREA)
+            cv2.resize(proc_bgr, (256, 256), interpolation=cv2.INTER_AREA)
         )
 
-        return jsonify({
+        # Resolve selected runs (admin can send; otherwise latest per backbone)
+        run_dirs = _resolve_selected_run_dirs(dataset, dict(request.form))
+        if len(run_dirs) == 0:
+            return _json_error(
+                f"No trained models found for dataset='{dataset}'. Train models first so runs/*/best_model.keras exists.",
+                400,
+            )
+
+        # Load models
+        models: Dict[str, Any] = {}
+        used_runs: Dict[str, str] = {}
+        for bb, rd in run_dirs.items():
+            mp = _get_run_model_path(rd)
+            if not mp or not mp.exists():
+                continue
+            try:
+                models[bb] = _load_keras_model_cached(mp)
+                used_runs[bb] = rd.name
+            except Exception as e:
+                return _json_error(f"Failed to load model for {bb}: {e}", 500, trace=traceback.format_exc()[:2000])
+
+        if len(models) == 0:
+            return _json_error("No usable best_model.keras found in selected runs.", 400)
+
+        # Per-model prediction
+        per_model = {}
+        for bb, model in models.items():
+            pred_idx, probs = _predict_one(model, proc_bgr)
+            per_model[bb] = {
+                "pred_class_index": int(pred_idx),
+                "pred_label": _label_from_index(pred_idx),
+                "probs": probs,
+            }
+
+        # Ensemble soft-vote (weights: equal/by_qwk/by_valacc)
+        weighting = (request.form.get("weighting") or "equal").strip().lower()
+        w_map = _auto_weights_from_runs(run_dirs={bb: run_dirs[bb] for bb in models.keys()}, weighting=weighting)
+
+        # Weighted probability sum
+        probs_sum = None
+        for bb, pm in per_model.items():
+            probs = np.asarray(pm["probs"], dtype=np.float32)
+            wi = float(w_map.get(bb, 0.0))
+            if probs_sum is None:
+                probs_sum = probs * wi
+            else:
+                probs_sum = probs_sum + probs * wi
+
+        if probs_sum is None:
+            return _json_error("Ensemble failed (no probabilities).", 500)
+
+        s = float(np.sum(probs_sum))
+        if s > 0:
+            probs_sum = probs_sum / s
+
+        ens_idx = int(np.argmax(probs_sum))
+        ensemble = {
+            "method": f"softvote_{weighting}",
+            "pred_class_index": ens_idx,
+            "pred_label": _label_from_index(ens_idx),
+            "probs": [float(x) for x in probs_sum.tolist()],
+            "weights": {k: float(v) for k, v in w_map.items()},
+        }
+
+        # Base response (both roles)
+        resp: Dict[str, Any] = {
             "status": "ok",
             "dataset": dataset,
+            "role": role,
             "preprocessed_preview_b64": preview_b64,
-            "models": models_out,
             "ensemble": ensemble,
-        })
+            "used_runs": used_runs,
+        }
+
+        # Admin gets extra details
+        if is_admin:
+            resp["per_model"] = per_model
+
+        return jsonify(resp)
 
     except Exception as e:
         return jsonify({
@@ -1124,6 +1247,9 @@ def api_predict():
 # =========================================================
 if __name__ == "__main__":
     print("🚀 Server running at http://127.0.0.1:5000")
+    print(f"📦 ROOT = {ROOT}")
+    print(f"📦 RAW_DATASETS_ROOT = {RAW_DATASETS_ROOT}")
     print(f"📦 STORAGE_ROOT = {STORAGE_ROOT}")
     print(f"📦 Datasets in registry: {list(DATASET_REGISTRY.keys())}")
+
     socketio.run(app, host="127.0.0.1", port=5000, debug=True, use_reloader=False)
