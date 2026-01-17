@@ -1,7 +1,9 @@
 
 cara running pakai GPU:
-venv_tf\Scripts\activate
+
 python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))" 
+
+venv_tf\Scripts\activate
 python app.py
 
 cara run unlabelled files 
